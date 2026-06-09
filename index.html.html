@@ -1,0 +1,1918 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>ERPK – ระบบจัดเวรแพทย์</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<style>
+body{font-family:'Segoe UI',Tahoma,sans-serif;background:#f1f5f9;}
+.chip{display:inline-flex;align-items:center;padding:1px 7px;border-radius:999px;font-size:10px;font-weight:700;border:1.5px solid;cursor:pointer;white-space:nowrap;margin:1px;line-height:1.6;transition:opacity 0.1s;}
+.chip:hover{filter:brightness(0.92);}
+.popup{position:fixed;z-index:9000;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.18);min-width:185px;}
+@media print{
+  .no-print{display:none!important;}
+  body{background:#fff;}
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useMemo}=React;
+
+const LS_VERSION="v10";
+
+/* ═══════════════════════════════════════════════
+   CONSTANTS
+═══════════════════════════════════════════════ */
+const LEVELS=["R1","R2","R3"];
+const SHIFTS=["morning","evening","night"];
+const SH_LABEL={morning:"เช้า (08-16)",evening:"บ่าย (16-24)",night:"ดึก (00-08)"};
+const SH_SHORT={morning:"เช้า",evening:"บ่าย",night:"ดึก"};
+const MONTHS=["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","มิ.ย.","ก.ค.","ส.ค.","ก.ย.","ต.ค.","พ.ย.","ธ.ค."];
+const LV_BG={R1:"#dbeafe",R2:"#dcfce7",R3:"#fef9c3"};
+const LV_BD={R1:"#93c5fd",R2:"#86efac",R3:"#fde047"};
+const LV_FG={R1:"#1e40af",R2:"#166534",R3:"#713f12"};
+const STAFFING={morning:{min:2,max:3},evening:{min:2,max:3},night:{min:2,max:2}};
+const STAFFING_FLEX={morning:{max:3},evening:{max:3}}; // evening expanded first if slot < min
+const ROTATIONS=["วนใน","วนนอก","วนนอกครึ่งเดือนแรก","วนนอกครึ่งเดือนหลัง"];
+const ROTATION_DEFAULTS={
+  "วนใน":{R3:23,R2:24,R1:25},
+  "วนนอก":{R3:7,R2:7,R1:7},
+  "วนนอกครึ่งเดือนแรก":{R3:18,R2:18,R1:18},
+  "วนนอกครึ่งเดือนหลัง":{R3:18,R2:18,R1:18},
+};
+const ROT_SHORT={"วนใน":"ใน","วนนอก":"นอก","วนนอกครึ่งเดือนแรก":"นอก½แรก","วนนอกครึ่งเดือนหลัง":"นอก½หลัง"};
+const PHYS_PALETTE=[
+  "#e74c3c","#e67e22","#d4ac0d","#27ae60","#16a085",
+  "#2980b9","#8e44ad","#c0392b","#1abc9c","#2ecc71",
+  "#e91e63","#ff5722","#607d8b","#795548","#673ab7",
+  "#0288d1","#689f38","#f57c00","#6d4c41","#00897b"
+];
+const PALETTE_FG=[
+  "#fff","#fff","#fff","#fff","#fff",
+  "#fff","#fff","#fff","#fff","#fff",
+  "#fff","#fff","#fff","#fff","#fff",
+  "#fff","#fff","#fff","#fff","#fff"
+];
+
+function physColor(id){
+  let h=0;for(let i=0;i<id.length;i++)h=(h*31+id.charCodeAt(i))>>>0;
+  const idx=h%PHYS_PALETTE.length;
+  return{bg:PHYS_PALETTE[idx],bd:PHYS_PALETTE[idx],fg:PALETTE_FG[idx]};
+}
+function physStyle(id){const c=physColor(id);return{backgroundColor:c.bg,borderColor:c.bd,color:c.fg};}
+
+/* ═══════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════ */
+function uid(){return Math.random().toString(36).slice(2,9);}
+function daysInMonth(y,m){return new Date(y,m,0).getDate();}
+function dateStr(y,m,d){return`${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;}
+function fmtDate(ds){if(!ds)return'';const[y,m,d]=ds.split('-');return`${+d} ${MONTHS[+m-1]} ${+y+543}`;}
+function isWeekend(ds){const d=new Date(ds);return d.getDay()===0||d.getDay()===6;}
+function isChief(p){return p.level==="R2"||p.level==="R3";}
+function loadLS(k,d){try{const v=localStorage.getItem(k);return v!==null?JSON.parse(v):d;}catch{return d;}}
+function saveLS(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch{}}
+
+// Returns true if doctor can ONLY work this shift today (e.g. วนนอก for evening)
+function isRestrictedToShift(p,date,shift){
+  return SHIFTS.filter(s=>s!==shift).every(s=>!isAvailableForSlot_raw(p,date,s));
+}
+
+// Blocked pairs (gap = 0 between shifts):
+//   ดึก→เช้า same day, เช้า→บ่าย same day, บ่าย day N → ดึก day N+1
+// Allowed 8เว้น8 (gap = 8hr):
+//   เช้า→ดึก next day, ดึก→บ่าย same day, บ่าย→เช้า next day
+function hasImmediateConflict(physicianId,date,shiftType,assignments){
+  const newR=shiftEpochRange(date,shiftType);
+  return assignments.some(a=>{
+    if(a.physicianId!==physicianId)return false;
+    const r=shiftEpochRange(a.date,a.shiftType);
+    return r.end===newR.start||newR.end===r.start; // exactly 0-hr gap
+  });
+}
+
+/* ── Shift time helpers (epoch minutes) ──────────────────────── */
+// ดึก of day N runs 00:00–08:00 of day N+1 (written on day N card, ends next morning)
+// This correctly produces:
+//   เช้า→บ่าย same day   : gap=0  → FORBIDDEN
+//   บ่าย→ดึก same day    : gap=0  → FORBIDDEN  (บ่าย ends midnight = ดึก starts midnight)
+//   ดึก→เช้า next day    : gap=0  → FORBIDDEN  (ดึก ends 08:00 day N+1 = เช้า day N+1 starts 08:00)
+//   เช้า→ดึก same day    : gap=8h → ALLOWED
+//   บ่าย→เช้า next day   : gap=8h → ALLOWED
+//   ดึก→บ่าย next day    : gap=8h → ALLOWED
+function shiftEpochRange(dateStr,shiftType){
+  const [y,m,d]=dateStr.split('-').map(Number);
+  const dayStart=Date.UTC(y,m-1,d)/60000;
+  if(shiftType==="morning") return{start:dayStart+8*60,  end:dayStart+16*60};  // 08:00-16:00
+  if(shiftType==="evening") return{start:dayStart+16*60, end:dayStart+24*60};  // 16:00-24:00
+  if(shiftType==="night")   return{start:dayStart+24*60, end:dayStart+32*60};  // 00:00-08:00 of day+1
+  return{start:dayStart,end:dayStart};
+}
+
+/* ── Consecutive run length if a new shift were added ────────── */
+function getRunLength(physicianId,date,shiftType,assignments){
+  const mine=assignments.filter(a=>a.physicianId===physicianId);
+  const ranges=mine.map(a=>shiftEpochRange(a.date,a.shiftType));
+  const newRange=shiftEpochRange(date,shiftType);
+  const ns=newRange.start,ne=newRange.end;
+
+  const sorted=[...ranges,newRange].sort((a,b)=>a.start-b.start);
+  const GAP=8*60;
+
+  // Walk through clusters; for each element track which cluster it belongs to and cluster size
+  // Two-pass: first assign cluster ids, then find cluster containing newRange
+  const clusterOf=new Array(sorted.length).fill(0);
+  let cid=0;
+  clusterOf[0]=0;
+  for(let i=1;i<sorted.length;i++){
+    const gap=sorted[i].start-sorted[i-1].end;
+    if(gap>GAP)cid++;
+    clusterOf[i]=cid;
+  }
+  // Find cluster of newRange
+  let targetCluster=-1;
+  for(let i=0;i<sorted.length;i++){
+    if(sorted[i].start===ns&&sorted[i].end===ne){targetCluster=clusterOf[i];break;}
+  }
+  if(targetCluster===-1)return 1;
+  return clusterOf.filter(c=>c===targetCluster).length;
+}
+
+function isInVanNokPeriod(physician,date){
+  const day=+date.slice(8);
+  const rot=physician.rotation||"วนนอก";
+  if(rot==="วนนอก")return true;
+  if(rot==="วนนอกครึ่งเดือนแรก")return day>15;   // วนนอก = second half 16-30
+  if(rot==="วนนอกครึ่งเดือนหลัง")return day<=15;  // วนนอก = first half 1-15
+  return false;
+}
+
+// How many shifts in this doctor's วนนอก half so far
+function vanNokHalfShiftCount(physicianId,date,assignments){
+  const day=+date.slice(8);
+  // determine which days are the วนนอก half
+  const [y,m]=date.split('-').map(Number);
+  const prefix=`${y}-${String(m).padStart(2,'0')}`;
+  return assignments.filter(a=>{
+    if(a.physicianId!==physicianId)return false;
+    if(!a.date.startsWith(prefix))return false;
+    const d=+a.date.slice(8);
+    return d>15===day>15; // same half
+  }).length;
+}
+
+function isAvailableForSlot_raw(physician,date,shiftType){
+  const day=+date.slice(8);
+  const rot=physician.rotation||"วนนอก";
+  if(rot==="วนนอก") return shiftType==="evening";
+  if(rot==="วนนอกครึ่งเดือนแรก"){
+    // วนใน period = days 1-15 (all shifts, majority of shifts here)
+    // วนนอก period = days 16-30 (evening only, 2-3/week max)
+    if(day<=15) return true;
+    return shiftType==="evening";
+  }
+  if(rot==="วนนอกครึ่งเดือนหลัง"){
+    // วนนอก period = days 1-15 (evening only, 2-3/week max)
+    // วนใน period = days 16-30 (all shifts, majority of shifts here)
+    if(day>15) return true;
+    return shiftType==="evening";
+  }
+  return true; // วนใน: all shifts
+}
+
+function isAvailableForSlot(physician,date,shiftType){return isAvailableForSlot_raw(physician,date,shiftType);}
+
+function validateCanGenerate(physicians,year,month){
+  const errors=[];
+  if(!physicians.length)return["ยังไม่มีแพทย์ในระบบ"];
+  const days=daysInMonth(year,month);
+  for(let d=1;d<=days;d++){
+    for(const shift of SHIFTS){
+      const date=dateStr(year,month,d);
+      const avail=physicians.filter(p=>
+        isAvailableForSlot(p,date,shift)&&
+        !(p.daysOff||[]).includes(date)&&!(p.shiftsOff||[]).includes(date+"_"+shift)&&
+        (p.maxShifts||0)>0
+      );
+      if(avail.length<STAFFING[shift].min){
+        errors.push(`วันที่ ${d} เวร${SH_SHORT[shift]}: แพทย์ไม่พอ (ต้องการ ${STAFFING[shift].min} คน มี ${avail.length} คน)`);
+      }
+    }
+  }
+  return errors;
+}
+
+function generateSchedule(physicians,year,month,existingAssignments){
+  const errors=[];
+  const fixed=existingAssignments.filter(a=>a.isLocked||a.isManual);
+  const newAssignments=[...fixed];
+  const shiftCounts={};
+  // Track per-shift-type counts for balanced morning/evening/night distribution
+  const shiftTypeCounts={};
+  physicians.forEach(p=>{
+    shiftCounts[p.id]=fixed.filter(a=>a.physicianId===p.id).length;
+    shiftTypeCounts[p.id]={morning:0,evening:0,night:0};
+    fixed.forEach(a=>{if(a.physicianId===p.id&&shiftTypeCounts[p.id][a.shiftType]!==undefined)shiftTypeCounts[p.id][a.shiftType]++;});
+  });
+
+  const days=daysInMonth(year,month);
+  for(let d=1;d<=days;d++){
+    for(const shift of SHIFTS){
+      const date=dateStr(year,month,d);
+      const slotFixed=fixed.filter(a=>a.date===date&&a.shiftType===shift);
+      const fixedPids=new Set(slotFixed.map(a=>a.physicianId));
+      let chiefInSlot=slotFixed.some(a=>{const p=physicians.find(x=>x.id===a.physicianId);return p&&isChief(p);});
+      const need=Math.max(0,STAFFING[shift].min-slotFixed.length);
+      if(need===0)continue;
+
+      let pool=physicians.filter(p=>
+        !fixedPids.has(p.id)&&
+        !(p.daysOff||[]).includes(date)&&
+        !(p.shiftsOff||[]).includes(date+"_"+shift)&&
+        (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+        isAvailableForSlot(p,date,shift)&&
+        // Hard block: forbidden 0-hr gaps (เช้า→บ่าย, ดึก→เช้า same day, บ่าย→ดึก cross-day)
+        !hasImmediateConflict(p.id,date,shift,newAssignments)&&
+        // Hard block: วนนอก period doctors cannot work weekends (Fri=5/Sat=6/Sun=0)
+        !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))
+      );
+
+      // Sort: 0) CHIEF REQUIRED if slot has none — chiefs always sorted first until one is placed
+      //       1) prefer doctors restricted to this shift  2) shift-type balance
+      //       3) run soft penalty  4) fewer shifts vs target
+      pool.sort((a,b)=>{
+        // Rule 0: if no chief in slot yet, put chiefs first (hard requirement)
+        if(!chiefInSlot){
+          const aC=isChief(a)?0:1, bC=isChief(b)?0:1;
+          if(aC!==bC)return aC-bC;
+        }
+
+        const aRes=isRestrictedToShift(a,date,shift)?0:1;
+        const bRes=isRestrictedToShift(b,date,shift)?0:1;
+        if(aRes!==bRes)return aRes-bRes;
+
+        // Weekend soft-block for วนนอก: prefer not to assign on Fri(5)/Sat(6)/Sun(0)
+        const dow=new Date(date+'T00:00:00').getDay();
+        const isWEnd=(dow===0||dow===5||dow===6);
+        if(isWEnd){
+          const aIsOuter=(a.rotation==="วนนอก"||((a.rotation==="วนนอกครึ่งเดือนแรก")&&+date.slice(8)<=15)||((a.rotation==="วนนอกครึ่งเดือนหลัง")&&+date.slice(8)>15));
+          const bIsOuter=(b.rotation==="วนนอก"||((b.rotation==="วนนอกครึ่งเดือนแรก")&&+date.slice(8)<=15)||((b.rotation==="วนนอกครึ่งเดือนหลัง")&&+date.slice(8)>15));
+          if(aIsOuter!==bIsOuter)return aIsOuter?1:-1;
+        }
+
+        // Primary: shift-type relative balance
+        const aTypeShares=shiftTypeCounts[a.id]||{morning:0,evening:0,night:0};
+        const bTypeShares=shiftTypeCounts[b.id]||{morning:0,evening:0,night:0};
+        const aTotal=(aTypeShares.morning||0)+(aTypeShares.evening||0)+(aTypeShares.night||0);
+        const bTotal=(bTypeShares.morning||0)+(bTypeShares.evening||0)+(bTypeShares.night||0);
+        const aRelDef=aTotal===0?0:(aTypeShares[shift]||0)/aTotal;
+        const bRelDef=bTotal===0?0:(bTypeShares[shift]||0)/bTotal;
+        if(Math.abs(aRelDef-bRelDef)>0.05)return aRelDef-bRelDef;
+
+        // Consecutive run soft penalty
+        const aRun=getRunLength(a.id,date,shift,newAssignments);
+        const bRun=getRunLength(b.id,date,shift,newAssignments);
+        if(aRun!==bRun){
+          if(aRun>4&&bRun<=4)return 1;
+          if(bRun>4&&aRun<=4)return -1;
+          if(aRun>3&&bRun<=3)return 1;
+          if(bRun>3&&aRun<=3)return -1;
+        }
+
+        // Penalize วนนอก-period doctors who already have many shifts in their วนนอก half
+        const aVanNok=isInVanNokPeriod(a,date);
+        const bVanNok=isInVanNokPeriod(b,date);
+        if(aVanNok||bVanNok){
+          const aHalf=aVanNok?vanNokHalfShiftCount(a.id,date,newAssignments):0;
+          const bHalf=bVanNok?vanNokHalfShiftCount(b.id,date,newAssignments):0;
+          // Soft cap at 6 shifts in วนนอก half (≈2-3/week)
+          if(aHalf>=6&&bHalf<6)return 1;
+          if(bHalf>=6&&aHalf<6)return -1;
+        }
+
+        const aDiff=(shiftCounts[a.id]||0)-(a.targetShifts||0);
+        const bDiff=(shiftCounts[b.id]||0)-(b.targetShifts||0);
+        if(aDiff!==bDiff)return aDiff-bDiff;
+        return (isChief(a)?0:1)-(isChief(b)?0:1);
+      });
+
+      let assigned=0;
+      // Pass 1: respect chief-once rule
+      for(const p of pool){
+        if(assigned>=need)break;
+        if(chiefInSlot&&isChief(p))continue;
+        newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
+        shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+        if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][shift]=(shiftTypeCounts[p.id][shift]||0)+1;
+        fixedPids.add(p.id);
+        if(isChief(p))chiefInSlot=true;
+        assigned++;
+      }
+      // Pass 2: relax chief-once if still under min
+      if(assigned<need){
+        for(const p of pool){
+          if(assigned>=need)break;
+          if(fixedPids.has(p.id))continue;
+          newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
+          shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+          if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][shift]=(shiftTypeCounts[p.id][shift]||0)+1;
+          fixedPids.add(p.id);
+          assigned++;
+        }
+      }
+
+      // Pass 3: relax soft run-length penalty (still block 0-hr gaps + maxShifts + availability)
+      if(assigned<need){
+        const pool3=physicians.filter(p=>
+          !fixedPids.has(p.id)&&
+          !(p.daysOff||[]).includes(date)&&
+          (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+          isAvailableForSlot(p,date,shift)&&
+          !hasImmediateConflict(p.id,date,shift,newAssignments)&&
+          // Hard block: วนนอก period doctors cannot work weekends (Fri=5/Sat=6/Sun=0)
+          !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))
+        );
+        pool3.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+        for(const p of pool3){
+          if(assigned>=need)break;
+          newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
+          shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+          if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][shift]=(shiftTypeCounts[p.id][shift]||0)+1;
+          fixedPids.add(p.id);
+          assigned++;
+        }
+      }
+
+      // Pass 4: overflow — ignore maxShifts (still block 0-hr gaps)
+      if(assigned<need){
+        const pool4=physicians.filter(p=>
+          !fixedPids.has(p.id)&&
+          !(p.daysOff||[]).includes(date)&&
+          isAvailableForSlot(p,date,shift)&&
+          !hasImmediateConflict(p.id,date,shift,newAssignments)
+        );
+        pool4.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+        for(const p of pool4){
+          if(assigned>=need)break;
+          newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
+          shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+          if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][shift]=(shiftTypeCounts[p.id][shift]||0)+1;
+          fixedPids.add(p.id);
+          assigned++;
+        }
+      }
+
+      const slotTotal=newAssignments.filter(a=>a.date===date&&a.shiftType===shift).length;
+      if(slotTotal<STAFFING[shift].min){
+        errors.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: แพทย์ที่เหลือไม่พอ — ลองเพิ่มแพทย์ R1 หรือเพิ่ม Max เวร (ได้ ${slotTotal}/${STAFFING[shift].min} คน)`);
+      }
+    }
+  }
+
+  // ── Enforce: every filled slot must have ≥1 Chief (R2/R3) ─────────────
+  for(let d=1;d<=days;d++){
+    for(const shift of SHIFTS){
+      const date=dateStr(year,month,d);
+      const slotA=newAssignments.filter(a=>a.date===date&&a.shiftType===shift);
+      if(slotA.length===0)continue;
+      const hasChief=slotA.some(a=>{const p=physicians.find(x=>x.id===a.physicianId);return p&&isChief(p);});
+      if(hasChief)continue;
+      // Slot has no chief — add one (up to 3 per slot allowed)
+      const existingPids=new Set(slotA.map(a=>a.physicianId));
+      const chiefPool=physicians.filter(p=>
+        isChief(p)&&
+        !existingPids.has(p.id)&&
+        !(p.daysOff||[]).includes(date)&&
+        !(p.shiftsOff||[]).includes(date+"_"+shift)&&
+        isAvailableForSlot(p,date,shift)&&
+        !hasImmediateConflict(p.id,date,shift,newAssignments)
+      );
+      if(chiefPool.length===0){
+        errors.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: ไม่สามารถหา Chief (R2/R3) ได้ — R1 อยู่คนเดียว`);
+        continue;
+      }
+      chiefPool.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+      const chief=chiefPool[0];
+      newAssignments.push({id:uid(),physicianId:chief.id,date,shiftType:shift,isLocked:false,isManual:false});
+      shiftCounts[chief.id]=(shiftCounts[chief.id]||0)+1;
+      if(shiftTypeCounts[chief.id])shiftTypeCounts[chief.id][shift]=(shiftTypeCounts[chief.id][shift]||0)+1;
+    }
+  }
+  // ──────────────────────────────────────────────────────────────────────
+  // For each doctor below their min, try to add them to available slots.
+  // Preference order for extra slots: evening (up to 3) → morning (up to 3).
+  // Night stays capped at 2.
+  const EXTRA_SHIFTS_ORDER=["evening","morning"];
+  const MAX_PER_SLOT=3; // allow up to 3 doctors per evening/morning when needed
+
+  let anyBelowMin=true;
+  let safety=0;
+  while(anyBelowMin&&safety++<5){
+    anyBelowMin=false;
+    // Sort doctors by deficit (most below min first)
+    const underMin=physicians
+      .filter(p=>(shiftCounts[p.id]||0)<(p.minShifts||0))
+      .sort((a,b)=>((shiftCounts[a.id]||0)-(a.minShifts||0))-((shiftCounts[b.id]||0)-(b.minShifts||0)));
+
+    for(const p of underMin){
+      anyBelowMin=true;
+      let added=false;
+      // Try each day, prefer days where slot has fewest people (balance within slot too)
+      const candidates=[];
+      for(let d=1;d<=days;d++){
+        const date=dateStr(year,month,d);
+        if((p.daysOff||[]).includes(date))continue;
+        for(const sh of EXTRA_SHIFTS_ORDER){
+          if((p.shiftsOff||[]).includes(date+"_"+sh))continue;
+          if(!isAvailableForSlot(p,date,sh))continue;
+          if(hasImmediateConflict(p.id,date,sh,newAssignments))continue;
+          if(newAssignments.some(a=>a.date===date&&a.shiftType===sh&&a.physicianId===p.id))continue;
+          const slotCount=newAssignments.filter(a=>a.date===date&&a.shiftType===sh).length;
+          if(slotCount>=MAX_PER_SLOT)continue;
+          // Weekend block for วนนอก period
+          if(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))continue;
+          candidates.push({date,sh,slotCount});
+        }
+      }
+      if(candidates.length===0)continue;
+      // Pick slot with fewest doctors (most need), break ties by date
+      candidates.sort((a,b)=>a.slotCount-b.slotCount||a.date.localeCompare(b.date)||
+        EXTRA_SHIFTS_ORDER.indexOf(a.sh)-EXTRA_SHIFTS_ORDER.indexOf(b.sh));
+      const best=candidates[0];
+      newAssignments.push({id:uid(),physicianId:p.id,date:best.date,shiftType:best.sh,isLocked:false,isManual:false});
+      shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+      if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][best.sh]=(shiftTypeCounts[p.id][best.sh]||0)+1;
+      added=true;
+    }
+    if(!anyBelowMin||!underMin.some(p=>(shiftCounts[p.id]||0)<(p.minShifts||0)))anyBelowMin=false;
+  }
+  // ────────────────────────────────────────────────────────────────────────
+
+  // Post-processing: cluster rest days into pairs
+  clusterRestDays(physicians,newAssignments,year,month);
+
+  return{ok:errors.length===0,assignments:newAssignments,errors};
+}
+
+/* ── Post-process: cluster isolated rest days ───────────────── */
+function clusterRestDays(physicians,assignments,year,month){
+  const days=daysInMonth(year,month);
+  const monthPrefix=`${year}-${String(month).padStart(2,'0')}`;
+  // Build per-doctor shift counts for the month
+  const counts={};
+  physicians.forEach(p=>{counts[p.id]=assignments.filter(a=>a.physicianId===p.id&&a.date.startsWith(monthPrefix)).length;});
+
+  for(const p of physicians){
+    const min=p.minShifts||0;
+    const max=p.maxShifts||99;
+    for(let d=2;d<days;d++){// skip first and last day (no neighbours)
+      const ds=dateStr(year,month,d);
+      const hasShift=assignments.some(a=>a.physicianId===p.id&&a.date===ds);
+      if(hasShift)continue;// not a rest day
+      const prev=dateStr(year,month,d-1);
+      const next=dateStr(year,month,d+1);
+      const hasPrev=assignments.some(a=>a.physicianId===p.id&&a.date===prev);
+      const hasNext=assignments.some(a=>a.physicianId===p.id&&a.date===next);
+      if(!hasPrev||!hasNext)continue;// not isolated
+
+      // Try to move one adjacent shift to the other side
+      // Prefer giving away 'next' shift if another doctor can absorb, giving p consecutive rest on d+1
+      for(const neighbour of [prev,next]){
+        const targetDay=neighbour===prev?next:prev;// we want targetDay to also become rest
+        const shiftToMove=assignments.find(a=>a.physicianId===p.id&&a.date===neighbour&&!a.isLocked&&!a.isManual);
+        if(!shiftToMove)continue;
+        // Find a doctor who can take this shift
+        const slotSh=shiftToMove.shiftType;
+        const slotDate=shiftToMove.date;
+        const alreadyThere=new Set(assignments.filter(a=>a.date===slotDate&&a.shiftType===slotSh).map(a=>a.physicianId));
+        const candidates=physicians.filter(q=>
+          q.id!==p.id&&
+          !alreadyThere.has(q.id)&&
+          !(q.daysOff||[]).includes(slotDate)&&
+          !(q.shiftsOff||[]).includes(slotDate+"_"+slotSh)&&
+          counts[q.id]<(q.maxShifts||99)&&
+          isAvailableForSlot(q,slotDate,slotSh)&&
+          counts[q.id]>=(q.minShifts||0)-1&&// don't pull from someone already below min
+          !hasImmediateConflict(q.id,slotDate,slotSh,assignments)// no forbidden pairs
+        );
+        if(candidates.length===0)continue;
+        // Pick candidate with fewest shifts
+        candidates.sort((a,b)=>(counts[a.id]||0)-(counts[b.id]||0));
+        const donor=candidates[0];
+        // Check run wouldn't exceed 4
+        const donorRun=getRunLength(donor.id,slotDate,slotSh,assignments);
+        if(donorRun>4)continue;
+        // Verify p won't drop below min
+        if(counts[p.id]-1<min)continue;
+        // Perform swap: remove p's assignment, add donor's
+        const idx=assignments.indexOf(shiftToMove);
+        if(idx<0)continue;
+        assignments.splice(idx,1,{...shiftToMove,id:uid(),physicianId:donor.id,isManual:false});
+        counts[p.id]--;
+        counts[donor.id]=(counts[donor.id]||0)+1;
+        break;// one swap per isolated rest day is enough
+      }
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   UI PRIMITIVES
+═══════════════════════════════════════════════ */
+function Btn({children,onClick,variant="primary",size="md",className="",disabled=false,...rest}){
+  const base="inline-flex items-center justify-center font-semibold rounded-lg transition-all focus:outline-none focus:ring-2 focus:ring-offset-1 disabled:opacity-50 disabled:cursor-not-allowed gap-1";
+  const sizes={sm:"px-3 py-1 text-xs",md:"px-4 py-2 text-sm",lg:"px-5 py-2.5 text-base"};
+  const variants={
+    primary:"bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-400 shadow-sm",
+    secondary:"bg-white text-slate-700 hover:bg-slate-50 focus:ring-slate-300 border border-slate-300 shadow-sm",
+    danger:"bg-red-500 text-white hover:bg-red-600 focus:ring-red-400 shadow-sm",
+    success:"bg-emerald-600 text-white hover:bg-emerald-700 focus:ring-emerald-400 shadow-sm",
+    ghost:"bg-transparent text-slate-600 hover:bg-slate-100 focus:ring-slate-300",
+    amber:"bg-amber-500 text-white hover:bg-amber-600 focus:ring-amber-400 shadow-sm",
+    purple:"bg-violet-600 text-white hover:bg-violet-700 focus:ring-violet-400 shadow-sm",
+  };
+  return(
+    <button type="button" onClick={onClick} disabled={disabled}
+      className={`${base} ${sizes[size]||sizes.md} ${variants[variant]||variants.primary} ${className}`} {...rest}>
+      {children}
+    </button>
+  );
+}
+
+function Badge({children,color="blue"}){
+  const map={
+    blue:"bg-blue-100 text-blue-800 border border-blue-200",
+    green:"bg-green-100 text-green-800 border border-green-200",
+    yellow:"bg-yellow-100 text-yellow-800 border border-yellow-200",
+    red:"bg-red-100 text-red-800 border border-red-200",
+    gray:"bg-gray-100 text-gray-700 border border-gray-200",
+    purple:"bg-purple-100 text-purple-800 border border-purple-200",
+    orange:"bg-orange-100 text-orange-800 border border-orange-200",
+    slate:"bg-slate-100 text-slate-700 border border-slate-200",
+  };
+  return<span className={`px-2 py-0.5 rounded-full text-xs font-semibold inline-block ${map[color]||map.blue}`}>{children}</span>;
+}
+
+function Card({children,className=""}){
+  return<div className={`bg-white rounded-xl shadow-sm border border-slate-200 ${className}`}>{children}</div>;
+}
+
+function Inp({value,onChange,placeholder="",type="text",className="",...rest}){
+  return<input type={type} value={value} onChange={onChange} placeholder={placeholder}
+    className={`border border-slate-300 rounded-lg px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white ${className}`} {...rest}/>;
+}
+
+function Field({label,children,className=""}){
+  return(
+    <div className={`mb-3 ${className}`}>
+      <label className="block text-xs font-bold text-slate-600 mb-1.5 uppercase tracking-wide">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function Modal({open,onClose,title,children,width="max-w-lg"}){
+  useEffect(()=>{
+    if(!open)return;
+    const h=(e)=>{if(e.key==="Escape")onClose();};
+    document.addEventListener("keydown",h);
+    return()=>document.removeEventListener("keydown",h);
+  },[open,onClose]);
+  if(!open)return null;
+  return(
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{background:"rgba(15,23,42,0.5)"}}>
+      <div className={`bg-white rounded-2xl shadow-2xl w-full ${width} max-h-[92vh] flex flex-col`}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 flex-shrink-0">
+          <h2 className="text-lg font-bold text-slate-800">{title}</h2>
+          <button type="button" onClick={onClose}
+            className="w-8 h-8 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 text-xl font-light transition-colors">
+            ×
+          </button>
+        </div>
+        <div className="overflow-y-auto flex-1 px-6 py-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   DAYS OFF PICKER
+═══════════════════════════════════════════════ */
+function DaysOffPicker({year,month,selected,onChange,shiftsOff,onShiftsOffChange}){
+  const days=daysInMonth(year,month);
+  const firstDow=new Date(year,month-1,1).getDay();
+  const cells=[];
+  for(let i=0;i<firstDow;i++)cells.push(null);
+  for(let d=1;d<=days;d++)cells.push(d);
+  while(cells.length%7!==0)cells.push(null);
+  const rows=[];
+  for(let i=0;i<cells.length;i+=7)rows.push(cells.slice(i,i+7));
+
+  const safeShiftsOff=shiftsOff||[];
+  function toggle(d){
+    const ds=dateStr(year,month,d);
+    onChange(selected.includes(ds)?selected.filter(x=>x!==ds):[...selected,ds]);
+  }
+  function toggleShiftOff(d,sh){
+    const key=dateStr(year,month,d)+"_"+sh;
+    if(onShiftsOffChange)onShiftsOffChange(safeShiftsOff.includes(key)?safeShiftsOff.filter(x=>x!==key):[...safeShiftsOff,key]);
+  }
+
+  const DOW=["อา","จ","อ","พ","พฤ","ศ","ส"];
+  return(
+    <div className="border border-slate-200 rounded-xl overflow-hidden select-none">
+      <div className="grid grid-cols-7 bg-slate-50 border-b border-slate-200">
+        {DOW.map((d,i)=>(
+          <div key={d} className={`text-center text-xs font-bold py-2 ${i===0||i===6?"text-red-400":"text-slate-500"}`}>{d}</div>
+        ))}
+      </div>
+      {rows.map((row,ri)=>(
+        <div key={ri} className="grid grid-cols-7">
+          {Array(7).fill(null).map((_,ci)=>{
+            const d=row[ci]||null;
+            if(!d)return<div key={ci} className="h-10 bg-slate-50/50"/>;
+            const ds=dateStr(year,month,d);
+            const off=selected.includes(ds);
+            const we=isWeekend(ds);
+            const shiftKeys={morning:ds+"_morning",evening:ds+"_evening",night:ds+"_night"};
+            return(
+              <div key={ci} className="border-t border-slate-100 flex flex-col items-center py-0.5">
+                <button type="button" onClick={()=>toggle(d)}
+                  className={`w-8 h-8 rounded-full text-sm font-semibold transition-all
+                    ${off?"bg-red-500 text-white":"hover:bg-slate-100"}
+                    ${we&&!off?"text-red-400":""}
+                    ${!we&&!off?"text-slate-700":""}`}>
+                  {d}
+                </button>
+                {off&&<span className="text-xs text-red-500 font-bold leading-none">หยุด</span>}
+                <div className="flex gap-0.5 mt-0.5">
+                  {[["ช","morning","#3b82f6"],["บ","evening","#f97316"],["ด","night","#7c3aed"]].map(([label,sh,color])=>{
+                    const active=safeShiftsOff.includes(shiftKeys[sh]);
+                    return(
+                      <button key={sh} type="button" onClick={e=>{e.stopPropagation();toggleShiftOff(d,sh);}}
+                        style={active?{backgroundColor:color,color:"#fff",border:`1px solid ${color}`}:{border:"1px solid #cbd5e1",color:"#64748b"}}
+                        className="w-5 h-5 rounded text-xs font-bold leading-none flex items-center justify-center transition-all">
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   PHYSICIANS PAGE
+═══════════════════════════════════════════════ */
+function PhysiciansPage({physicians,setPhysicians,year,month}){
+  const [modalOpen,setModalOpen]=useState(false);
+  const [editId,setEditId]=useState(null);
+  const [fName,setFName]=useState("");
+  const [fLevel,setFLevel]=useState("R1");
+  const [fRotation,setFRotation]=useState("วนนอก");
+  const [fMin,setFMin]=useState(5);
+  const [fTarget,setFTarget]=useState(7);
+  const [fMax,setFMax]=useState(10);
+  const [fDaysOff,setFDaysOff]=useState([]);
+  const [fShiftsOff,setFShiftsOff]=useState([]);
+  const [fPrefs,setFPrefs]=useState([]);
+
+  function applyDefaults(rot,lv){
+    const t=ROTATION_DEFAULTS[rot]?.[lv]||7;
+    setFTarget(t);
+    setFMin(Math.max(1,t-2));
+    setFMax(t+3);
+  }
+  function handleRotChange(r){setFRotation(r);applyDefaults(r,fLevel);}
+  function handleLvChange(l){setFLevel(l);applyDefaults(fRotation,l);}
+  function togglePref(s){setFPrefs(pp=>pp.includes(s)?pp.filter(x=>x!==s):[...pp,s]);}
+
+  function openAdd(){
+    setEditId(null);setFName("");setFLevel("R1");setFRotation("วนนอก");
+    applyDefaults("วนนอก","R1");setFDaysOff([]);setFShiftsOff([]);setFPrefs([]);setModalOpen(true);
+  }
+  function openEdit(p){
+    setEditId(p.id);setFName(p.name);setFLevel(p.level);
+    setFRotation(p.rotation||"วนนอก");setFMin(p.minShifts);
+    setFTarget(p.targetShifts);setFMax(p.maxShifts);
+    setFDaysOff(p.daysOff||[]);setFShiftsOff(p.shiftsOff||[]);setFPrefs(p.preferredShifts||[]);
+    setModalOpen(true);
+  }
+  function handleDelete(id){
+    if(window.confirm("ลบแพทย์คนนี้ออกจากระบบ?"))
+      setPhysicians(prev=>prev.filter(p=>p.id!==id));
+  }
+  function handleSave(){
+    if(!fName.trim())return;
+    const obj={
+      id:editId||uid(),name:fName.trim(),level:fLevel,rotation:fRotation,
+      minShifts:+fMin,targetShifts:+fTarget,maxShifts:+fMax,
+      daysOff:fDaysOff,shiftsOff:fShiftsOff,preferredShifts:fPrefs
+    };
+    if(editId)setPhysicians(prev=>prev.map(p=>p.id===editId?obj:p));
+    else setPhysicians(prev=>[...prev,obj]);
+    setModalOpen(false);
+  }
+
+  const lvColor={R1:"blue",R2:"green",R3:"yellow"};
+  const monthPrefix=`${year}-${String(month).padStart(2,'0')}`;
+
+  return(
+    <div className="p-4 max-w-5xl mx-auto">
+      <div className="flex items-center justify-between mb-5">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-800">แพทย์ทั้งหมด</h1>
+          <p className="text-sm text-slate-500 mt-0.5">{physicians.length} คนในระบบ</p>
+        </div>
+        <Btn onClick={openAdd} variant="primary">+ เพิ่มแพทย์</Btn>
+      </div>
+      <Card>
+        {physicians.length===0?(
+          <div className="py-16 text-center">
+            <div className="text-6xl mb-4">👨‍⚕️</div>
+            <div className="text-lg font-semibold text-slate-500">ยังไม่มีแพทย์ในระบบ</div>
+            <div className="text-sm text-slate-400 mt-1">กดปุ่ม "เพิ่มแพทย์" เพื่อเริ่มต้นใช้งาน</div>
+            <button type="button" onClick={openAdd}
+              className="mt-4 px-5 py-2 bg-blue-600 text-white rounded-xl text-sm font-semibold hover:bg-blue-700 transition-colors">
+              + เพิ่มแพทย์คนแรก
+            </button>
+          </div>
+        ):(
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[700px]">
+              <thead>
+                <tr className="border-b-2 border-slate-200 bg-slate-50/80">
+                  {["แพทย์","ระดับ","รูปแบบวน","Min","Target","Max","วันหยุด/เดือน",""].map((h,i)=>(
+                    <th key={i} className={`px-4 py-3 font-bold text-slate-600 text-xs uppercase tracking-wide ${i>=3&&i<=5?"text-center":i===0?"text-left":"text-center"}`}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {physicians.map((p,i)=>{
+                  const monthOff=(p.daysOff||[]).filter(d=>d.startsWith(monthPrefix)).length;
+                  const col=physColor(p.id);
+                  return(
+                    <tr key={p.id} className={`border-b border-slate-100 hover:bg-blue-50/30 transition-colors ${i%2===1?"bg-slate-50/40":""}`}>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2.5">
+                          <span className="w-3.5 h-3.5 rounded-full flex-shrink-0 shadow-sm"
+                            style={{backgroundColor:col.bg,border:`2px solid ${col.bd}`}}/>
+                          <span className="font-semibold text-slate-800">{p.name}</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-center"><Badge color={lvColor[p.level]}>{p.level}</Badge></td>
+                      <td className="px-4 py-3 text-center"><Badge color="purple">{ROT_SHORT[p.rotation||"วนนอก"]}</Badge></td>
+                      <td className="px-4 py-3 text-center text-slate-600">{p.minShifts}</td>
+                      <td className="px-4 py-3 text-center"><span className="font-bold text-blue-700">{p.targetShifts}</span></td>
+                      <td className="px-4 py-3 text-center text-slate-600">{p.maxShifts}</td>
+                      <td className="px-4 py-3 text-center">
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${monthOff>0?"bg-red-100 text-red-700 border border-red-200":"bg-slate-100 text-slate-500 border border-slate-200"}`}>
+                          {monthOff} วัน
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center justify-end gap-2">
+                          <Btn size="sm" variant="secondary" onClick={()=>openEdit(p)}>✏ แก้ไข</Btn>
+                          <Btn size="sm" variant="danger" onClick={()=>handleDelete(p.id)}>🗑</Btn>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <Modal open={modalOpen} onClose={()=>setModalOpen(false)}
+        title={editId?"✏ แก้ไขข้อมูลแพทย์":"+ เพิ่มแพทย์ใหม่"} width="max-w-2xl">
+        <Field label="ชื่อ-นามสกุล">
+          <Inp value={fName} onChange={e=>setFName(e.target.value)} placeholder="เช่น นพ.สมชาย ใจดี"/>
+        </Field>
+        <Field label="ระดับ (Level)">
+          <div className="flex gap-2">
+            {LEVELS.map(l=>(
+              <button key={l} type="button" onClick={()=>handleLvChange(l)}
+                className={`flex-1 py-2.5 rounded-xl text-sm font-bold border-2 transition-all ${fLevel===l?"shadow-md":"border-slate-200 text-slate-400 hover:border-slate-300"}`}
+                style={fLevel===l?{backgroundColor:LV_BG[l],borderColor:LV_BD[l],color:LV_FG[l]}:{}}>
+                {l}
+              </button>
+            ))}
+          </div>
+        </Field>
+        <Field label="รูปแบบการวน">
+          <div className="grid grid-cols-2 gap-2">
+            {ROTATIONS.map(r=>(
+              <button key={r} type="button" onClick={()=>handleRotChange(r)}
+                className={`py-2.5 px-3 rounded-xl text-xs font-semibold border-2 transition-all text-left ${fRotation===r?"bg-violet-50 border-violet-400 text-violet-700 shadow-sm":"border-slate-200 text-slate-500 hover:border-slate-300 hover:bg-slate-50"}`}>
+                {r}
+              </button>
+            ))}
+          </div>
+        </Field>
+        <div className="grid grid-cols-3 gap-3">
+          <Field label="Min เวร"><Inp type="number" value={fMin} onChange={e=>setFMin(e.target.value)} min={0}/></Field>
+          <Field label="Target เวร"><Inp type="number" value={fTarget} onChange={e=>setFTarget(e.target.value)} min={0}/></Field>
+          <Field label="Max เวร"><Inp type="number" value={fMax} onChange={e=>setFMax(e.target.value)} min={0}/></Field>
+        </div>
+        <Field label="เวรที่ต้องการ">
+          <div className="flex gap-5">
+            {SHIFTS.map(s=>(
+              <label key={s} className="flex items-center gap-2 cursor-pointer group">
+                <input type="checkbox" checked={fPrefs.includes(s)} onChange={()=>togglePref(s)}
+                  className="w-4 h-4 rounded accent-blue-600"/>
+                <span className="text-sm font-medium text-slate-700 group-hover:text-blue-600">{SH_SHORT[s]}</span>
+              </label>
+            ))}
+          </div>
+        </Field>
+        <Field label={`วันหยุด — ${MONTHS[month-1]} ${year+543}`}>
+          <DaysOffPicker year={year} month={month} selected={fDaysOff} onChange={setFDaysOff}
+  shiftsOff={fShiftsOff} onShiftsOffChange={setFShiftsOff}/>
+          <p className="text-xs text-slate-500 mt-1.5">
+            เลือก {fDaysOff.filter(d=>d.startsWith(`${year}-${String(month).padStart(2,'0')}`)).length} วันในเดือนนี้
+            {fDaysOff.length>0&&` (รวม ${fDaysOff.length} วัน)`}
+          </p>
+        </Field>
+        <div className="flex gap-2 pt-2 border-t border-slate-200 mt-2">
+          <Btn onClick={handleSave} variant="primary" className="flex-1">💾 บันทึก</Btn>
+          <Btn onClick={()=>setModalOpen(false)} variant="secondary">ยกเลิก</Btn>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   STAFF PORTAL
+═══════════════════════════════════════════════ */
+function StaffPortal({physicians,setPhysicians,year,month}){
+  const [selId,setSelId]=useState("");
+  const [fDaysOff,setFDaysOff]=useState([]);
+  const [fPrefs,setFPrefs]=useState([]);
+  const [fRotation,setFRotation]=useState("วนนอก");
+  const [saved,setSaved]=useState(false);
+
+  const p=useMemo(()=>physicians.find(x=>x.id===selId),[selId,physicians]);
+
+  useEffect(()=>{
+    if(p){
+      setFDaysOff(p.daysOff||[]);
+      setFPrefs(p.preferredShifts||[]);
+      setFRotation(p.rotation||"วนนอก");
+    }
+    setSaved(false);
+  },[selId]);
+
+  function handleSave(){
+    setPhysicians(prev=>prev.map(x=>x.id===selId
+      ?{...x,daysOff:fDaysOff,preferredShifts:fPrefs,rotation:fRotation}:x));
+    setSaved(true);
+    setTimeout(()=>setSaved(false),3000);
+  }
+  function togglePref(s){setFPrefs(pp=>pp.includes(s)?pp.filter(x=>x!==s):[...pp,s]);}
+
+  const lvColor={R1:"blue",R2:"green",R3:"yellow"};
+  const monthPrefix=`${year}-${String(month).padStart(2,'0')}`;
+
+  return(
+    <div className="p-4 max-w-2xl mx-auto">
+      <h1 className="text-2xl font-bold text-slate-800 mb-1">พอร์ทัลแพทย์</h1>
+      <p className="text-sm text-slate-500 mb-5">แพทย์สามารถแก้ไขข้อมูลตนเองได้ที่นี่</p>
+      <Card className="p-5">
+        <Field label="เลือกแพทย์">
+          <select value={selId} onChange={e=>setSelId(e.target.value)}
+            className="border border-slate-300 rounded-lg px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white">
+            <option value="">-- เลือกชื่อแพทย์ --</option>
+            {physicians.map(ph=><option key={ph.id} value={ph.id}>{ph.name} ({ph.level})</option>)}
+          </select>
+        </Field>
+
+        {p&&(
+          <>
+            <div className="flex items-center gap-3 p-3 bg-gradient-to-r from-slate-50 to-blue-50 rounded-xl mb-4 border border-slate-200">
+              <span className="w-5 h-5 rounded-full shadow-sm flex-shrink-0"
+                style={{backgroundColor:physColor(p.id).bg,border:`2px solid ${physColor(p.id).bd}`}}/>
+              <span className="font-bold text-slate-800">{p.name}</span>
+              <Badge color={lvColor[p.level]}>{p.level}</Badge>
+              <Badge color="purple">{ROT_SHORT[p.rotation||"วนนอก"]}</Badge>
+            </div>
+
+            <Field label="รูปแบบการวน">
+              <div className="grid grid-cols-2 gap-2">
+                {ROTATIONS.map(r=>(
+                  <button key={r} type="button" onClick={()=>setFRotation(r)}
+                    className={`py-2 px-3 rounded-xl text-xs font-semibold border-2 transition-all text-left ${fRotation===r?"bg-violet-50 border-violet-400 text-violet-700":"border-slate-200 text-slate-500 hover:border-slate-300"}`}>
+                    {r}
+                  </button>
+                ))}
+              </div>
+            </Field>
+
+            <Field label="เวรที่ต้องการ">
+              <div className="flex gap-5">
+                {SHIFTS.map(s=>(
+                  <label key={s} className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={fPrefs.includes(s)} onChange={()=>togglePref(s)}
+                      className="w-4 h-4 accent-blue-600"/>
+                    <span className="text-sm font-medium">{SH_SHORT[s]}</span>
+                  </label>
+                ))}
+              </div>
+            </Field>
+
+            <Field label={`วันหยุด — ${MONTHS[month-1]} ${year+543}`}>
+              <DaysOffPicker year={year} month={month} selected={fDaysOff} onChange={setFDaysOff}/>
+              <p className="text-xs text-slate-500 mt-1.5">
+                เดือนนี้: {fDaysOff.filter(d=>d.startsWith(monthPrefix)).length} วันหยุด
+              </p>
+            </Field>
+
+            <div className="flex gap-2 pt-2 border-t border-slate-200">
+              <Btn onClick={handleSave} variant={saved?"success":"primary"} className="flex-1">
+                {saved?"✓ บันทึกแล้ว":"💾 บันทึก"}
+              </Btn>
+            </div>
+          </>
+        )}
+        {!selId&&(
+          <div className="py-10 text-center text-slate-400">
+            <div className="text-4xl mb-3">👤</div>
+            <div className="text-sm">เลือกชื่อแพทย์เพื่อดูและแก้ไขข้อมูล</div>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   CHIP MENU
+═══════════════════════════════════════════════ */
+function ChipMenu({x,y,assignment,physician,physicians,assignments,setAssignments,onClose}){
+  const ref=useRef(null);
+  const [hoverMove,setHoverMove]=useState(false);
+
+  useEffect(()=>{
+    function h(e){if(ref.current&&!ref.current.contains(e.target))onClose();}
+    document.addEventListener("mousedown",h,true);
+    return()=>document.removeEventListener("mousedown",h,true);
+  },[onClose]);
+
+  // viewport clamp
+  const cx=Math.min(x,window.innerWidth-230);
+  const cy=Math.min(y,window.innerHeight-220);
+  const outsideRot=physician&&!isAvailableForSlot(physician,assignment.date,assignment.shiftType);
+
+  function doMove(shift){
+    if(shift===assignment.shiftType){onClose();return;}
+    setAssignments(prev=>prev.map(a=>a.id===assignment.id?{...a,shiftType:shift,isManual:true}:a));
+    onClose();
+  }
+  function doRemove(){
+    setAssignments(prev=>prev.filter(a=>a.id!==assignment.id));
+    onClose();
+  }
+
+  return(
+    <div ref={ref} className="popup" style={{left:cx,top:cy}}>
+      <div className="px-3 py-2.5 border-b border-slate-100">
+        <div className="flex items-center gap-1.5">
+          {outsideRot&&<span className="text-amber-500 text-sm">⚠</span>}
+          <span className="font-bold text-sm text-slate-800">{physician?.name}</span>
+          <Badge color={{R1:"blue",R2:"green",R3:"yellow"}[physician?.level]}>{physician?.level}</Badge>
+        </div>
+        <div className="text-xs text-slate-500 mt-0.5">{fmtDate(assignment.date)} · {SH_SHORT[assignment.shiftType]}</div>
+        {outsideRot&&<div className="text-xs text-amber-600 mt-0.5 bg-amber-50 px-1.5 py-0.5 rounded">⚠ นอกรูปแบบ ({physician?.rotation})</div>}
+      </div>
+      <div className="p-1">
+        <div className="relative"
+          onMouseEnter={()=>setHoverMove(true)} onMouseLeave={()=>setHoverMove(false)}>
+          <button type="button"
+            className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-slate-50 flex items-center justify-between text-slate-700">
+            <span>↔ ย้ายไปเวร…</span>
+            <span className="text-slate-400 text-xs">›</span>
+          </button>
+          {hoverMove&&(
+            <div className="absolute left-full top-0 ml-1 bg-white border border-slate-200 rounded-xl shadow-xl py-1"
+              style={{minWidth:150,zIndex:9001}}>
+              {SHIFTS.filter(s=>s!==assignment.shiftType).map(s=>(
+                <button key={s} type="button" onClick={()=>doMove(s)}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 hover:text-blue-700 transition-colors">
+                  {SH_LABEL[s]}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <button type="button" onClick={doRemove}
+          className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-red-50 text-red-600 font-medium">
+          ✕ ลบออกจากเวร
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   ADD SLOT MENU
+═══════════════════════════════════════════════ */
+function AddSlotMenu({x,y,date,shift,physicians,assignments,setAssignments,onClose}){
+  const ref=useRef(null);
+  useEffect(()=>{
+    function h(e){if(ref.current&&!ref.current.contains(e.target))onClose();}
+    document.addEventListener("mousedown",h,true);
+    return()=>document.removeEventListener("mousedown",h,true);
+  },[onClose]);
+
+  const cx=Math.min(x,window.innerWidth-250);
+  const cy=Math.min(y,window.innerHeight-350);
+
+  const inSlot=new Set(assignments.filter(a=>a.date===date&&a.shiftType===shift).map(a=>a.physicianId));
+  const available=physicians.filter(p=>!inSlot.has(p.id)&&!(p.daysOff||[]).includes(date));
+  const inside=available.filter(p=>isAvailableForSlot(p,date,shift));
+  const outside=available.filter(p=>!isAvailableForSlot(p,date,shift));
+
+  function addPhys(p){
+    setAssignments(prev=>[...prev,{id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:true}]);
+    onClose();
+  }
+
+  const lvColor={R1:"blue",R2:"green",R3:"yellow"};
+  const PhysRow=({p,warn})=>(
+    <button type="button" onClick={()=>addPhys(p)}
+      className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 hover:bg-blue-50 transition-colors`}>
+      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{backgroundColor:physColor(p.id).bg}}/>
+      <span className="flex-1 font-medium truncate">{p.name}</span>
+      <Badge color={lvColor[p.level]}>{p.level}</Badge>
+      {warn&&<span className="text-amber-500 text-xs">⚠</span>}
+    </button>
+  );
+
+  return(
+    <div ref={ref} className="popup" style={{left:cx,top:cy,maxHeight:340,overflowY:"auto"}}>
+      <div className="px-3 py-2 border-b border-slate-100 bg-slate-50 rounded-t-[10px] sticky top-0">
+        <div className="text-xs font-bold text-slate-600">{fmtDate(date)}</div>
+        <div className="text-xs text-slate-500">{SH_LABEL[shift]}</div>
+      </div>
+      {available.length===0&&(
+        <div className="p-4 text-center text-xs text-slate-400">ไม่มีแพทย์ว่างสำหรับเวรนี้</div>
+      )}
+      {inside.map(p=><PhysRow key={p.id} p={p} warn={false}/>)}
+      {outside.length>0&&(
+        <>
+          <div className="px-3 py-1 text-xs font-bold text-amber-600 bg-amber-50 border-t border-amber-100">
+            ⚠ นอกรูปแบบการวน
+          </div>
+          {outside.map(p=><PhysRow key={p.id} p={p} warn={true}/>)}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   ACTIVITY MENU
+═══════════════════════════════════════════════ */
+const ACT_TYPES=["Holiday","Meeting","Training","Note"];
+const ACT_TYPE_TH={Holiday:"วันหยุด",Meeting:"ประชุม",Training:"อบรม",Note:"หมายเหตุ"};
+const ACT_COLORS=["#ef4444","#3b82f6","#10b981","#f59e0b","#8b5cf6"];
+
+function ActivityMenu({x,y,date,activities,setActivities,onClose}){
+  const ref=useRef(null);
+  const [form,setForm]=useState(null); // null=list, {id?,title,type,color}=editing
+
+  useEffect(()=>{
+    function h(e){if(ref.current&&!ref.current.contains(e.target))onClose();}
+    document.addEventListener("mousedown",h,true);
+    return()=>document.removeEventListener("mousedown",h,true);
+  },[onClose]);
+
+  const cx=Math.min(x,window.innerWidth-270);
+  const cy=Math.min(y,window.innerHeight-400);
+  const dayActs=activities.filter(a=>a.date===date);
+
+  function startAdd(){setForm({title:"",type:"Note",color:"#f59e0b"});}
+  function startEdit(a){setForm({id:a.id,title:a.title,type:a.type,color:a.color});}
+  function handleSave(){
+    if(!form.title.trim())return;
+    if(form.id){
+      setActivities(prev=>prev.map(a=>a.id===form.id?{...a,...form}:a));
+    }else{
+      setActivities(prev=>[...prev,{id:uid(),date,...form}]);
+    }
+    setForm(null);
+  }
+  function handleDelete(id){setActivities(prev=>prev.filter(a=>a.id!==id));}
+
+  return(
+    <div ref={ref} className="popup" style={{left:cx,top:cy,minWidth:265}}>
+      <div className="px-3 py-2 border-b border-slate-100 bg-slate-50 rounded-t-[10px] flex items-center justify-between">
+        <span className="text-xs font-bold text-slate-600">{fmtDate(date)}</span>
+        {!form&&(
+          <button type="button" onClick={startAdd}
+            className="text-xs text-blue-600 font-bold hover:underline">+ เพิ่ม</button>
+        )}
+      </div>
+
+      {!form&&(
+        <>
+          {dayActs.length===0&&(
+            <div className="p-4 text-center text-xs text-slate-400">ยังไม่มีกิจกรรม</div>
+          )}
+          {dayActs.map(a=>(
+            <div key={a.id} className="flex items-center gap-2 px-3 py-2 border-b border-slate-50 hover:bg-slate-50">
+              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{backgroundColor:a.color}}/>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-semibold truncate">{a.title}</div>
+                <div className="text-xs text-slate-400">{ACT_TYPE_TH[a.type]||a.type}</div>
+              </div>
+              <button type="button" onClick={()=>startEdit(a)}
+                className="text-slate-400 hover:text-blue-500 text-xs p-1">✏</button>
+              <button type="button" onClick={()=>handleDelete(a.id)}
+                className="text-slate-400 hover:text-red-500 text-xs p-1">✕</button>
+            </div>
+          ))}
+        </>
+      )}
+
+      {form&&(
+        <div className="p-3">
+          <input value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))}
+            placeholder="ชื่อกิจกรรม"
+            className="border border-slate-300 rounded-lg px-2 py-1.5 text-sm w-full mb-2.5 focus:outline-none focus:ring-2 focus:ring-blue-400"/>
+          <div className="flex flex-wrap gap-1 mb-2.5">
+            {ACT_TYPES.map(t=>(
+              <button key={t} type="button" onClick={()=>setForm(f=>({...f,type:t}))}
+                className={`px-2 py-0.5 rounded-lg text-xs font-semibold border transition-all ${form.type===t?"bg-blue-100 border-blue-400 text-blue-700":"border-slate-200 text-slate-500 hover:border-slate-300"}`}>
+                {ACT_TYPE_TH[t]}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-2 mb-3 items-center">
+            <span className="text-xs text-slate-500">สี:</span>
+            {ACT_COLORS.map(c=>(
+              <button key={c} type="button" onClick={()=>setForm(f=>({...f,color:c}))}
+                className="w-6 h-6 rounded-full transition-transform hover:scale-110"
+                style={{backgroundColor:c,outline:form.color===c?"3px solid #334155":"2px solid transparent",outlineOffset:1}}/>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={handleSave}
+              className="flex-1 bg-blue-600 text-white py-1.5 rounded-lg text-xs font-bold hover:bg-blue-700">
+              บันทึก
+            </button>
+            <button type="button" onClick={()=>setForm(null)}
+              className="px-3 text-xs py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">
+              ยกเลิก
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   MONTHLY CALENDAR
+═══════════════════════════════════════════════ */
+const SHIFT_BG={morning:"#eff6ff",evening:"#f0fdf4",night:"#faf5ff"};
+const SHIFT_BD={morning:"#bfdbfe",evening:"#bbf7d0",night:"#e9d5ff"};
+const DOW_LABELS=["อา","จ","อ","พ","พฤ","ศ","ส"];
+
+function MonthlyCalendar({year,month,physicians,assignments,setAssignments,activities,setActivities,highlightPid,readOnly}){
+  const [menu,setMenu]=useState(null);
+  const days=daysInMonth(year,month);
+  const firstDow=new Date(year,month-1,1).getDay();
+  const today=new Date();
+  const todayStr=dateStr(today.getFullYear(),today.getMonth()+1,today.getDate());
+
+  function closeMenu(){setMenu(null);}
+
+  function onChipClick(e,a,phys){
+    if(readOnly)return;
+    e.stopPropagation();
+    const x=Math.min(e.clientX,window.innerWidth-240);
+    const y=Math.min(e.clientY+4,window.innerHeight-240);
+    setMenu({type:"chip",x,y,assignment:a,physician:phys});
+  }
+  function onAddClick(e,date,shift){
+    if(readOnly)return;
+    e.stopPropagation();
+    const x=Math.min(e.clientX,window.innerWidth-260);
+    const y=Math.min(e.clientY+4,window.innerHeight-360);
+    setMenu({type:"add",x,y,date,shift});
+  }
+  function onActClick(e,date){
+    e.stopPropagation();
+    const x=Math.min(e.clientX,window.innerWidth-280);
+    const y=Math.min(e.clientY+4,window.innerHeight-420);
+    setMenu({type:"act",x,y,date});
+  }
+
+  const cells=[];
+  for(let i=0;i<firstDow;i++)cells.push(null);
+  for(let d=1;d<=days;d++)cells.push(d);
+  while(cells.length%7!==0)cells.push(null);
+  const rows=[];
+  for(let i=0;i<cells.length;i+=7)rows.push(cells.slice(i,i+7));
+
+  return(
+    <div>
+      {/* Day headers */}
+      <div className="grid grid-cols-7 border-b border-slate-200 bg-slate-50">
+        {DOW_LABELS.map((d,i)=>(
+          <div key={d} className={`text-center py-2 text-xs font-bold ${i===0||i===6?"text-red-500":"text-slate-500"}`}>{d}</div>
+        ))}
+      </div>
+
+      {/* Rows */}
+      {rows.map((row,ri)=>(
+        <div key={ri} className="grid grid-cols-7">
+          {row.map((d,ci)=>{
+            if(!d){
+              return<div key={ci} className="border-r border-b border-slate-200 bg-slate-50/60" style={{minHeight:145}}/>;
+            }
+            const ds=dateStr(year,month,d);
+            const isWE=isWeekend(ds);
+            const isTod=ds===todayStr;
+            const dayActs=activities.filter(a=>a.date===ds);
+            const cellClass=`border-r border-b border-slate-200 p-1.5 ${isWE?"bg-rose-50/40":"bg-white"} ${isTod?"ring-2 ring-inset ring-blue-500 ring-opacity-70":""}`;
+            return(
+              <div key={ci} className={cellClass} style={{minHeight:145}}>
+                {/* Date number row */}
+                <div className="flex items-center justify-between mb-1">
+                  <span className={`text-xs font-bold leading-none
+                    ${isWE?"text-red-500":"text-slate-700"}
+                    ${isTod?"bg-blue-600 text-white w-5 h-5 rounded-full flex items-center justify-center":""}`}>
+                    {d}
+                  </span>
+                </div>
+
+                {/* Shifts */}
+                {SHIFTS.map(sh=>{
+                  const slotA=assignments.filter(a=>a.date===ds&&a.shiftType===sh);
+                  const cnt=slotA.length;
+                  const minR=STAFFING[sh].min;
+                  const under=cnt>0&&cnt<minR;
+                  const empty=cnt===0;
+                  return(
+                    <div key={sh} className="mb-1 rounded-lg overflow-hidden"
+                      style={{background:SHIFT_BG[sh],border:`1px solid ${under?"#fca5a5":SHIFT_BD[sh]}`}}>
+                      <div className="flex items-center justify-between px-1.5 pt-0.5">
+                        <span style={{fontSize:8,fontWeight:800,color:"#64748b",letterSpacing:"0.03em"}}>{SH_SHORT[sh]}</span>
+                        <span style={{fontSize:7,color:under||empty?"#ef4444":"#94a3b8",fontWeight:600}}>
+                          {cnt}/{minR}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap px-0.5 pb-0.5 gap-0">
+                        {slotA.map(a=>{
+                          const phys=physicians.find(p=>p.id===a.physicianId);
+                          if(!phys)return null;
+                          const dim=!!(highlightPid&&highlightPid!==phys.id);
+                          const outside=!isAvailableForSlot(phys,ds,sh);
+                          return(
+                            <span key={a.id} className="chip"
+                              style={{...physStyle(phys.id),opacity:dim?0.25:1,
+                                outline:outside?"2px solid #f59e0b":"none",outlineOffset:0}}
+                              onClick={e=>onChipClick(e,a,phys)}
+                              title={`${phys.name}${outside?" (⚠ นอกรูปแบบ)":""}`}>
+                              {outside&&<span style={{fontSize:8,marginRight:1}}>⚠</span>}
+                              {phys.name.replace(/^(นพ\.|พญ\.)\s*/,'')}
+                            </span>
+                          );
+                        })}
+                        {!readOnly&&(
+                          <button type="button" onClick={e=>onAddClick(e,ds,sh)}
+                            className="chip"
+                            style={{backgroundColor:"transparent",borderColor:"#cbd5e1",
+                              color:"#94a3b8",borderStyle:"dashed",fontSize:9,padding:"1px 5px"}}
+                            title="เพิ่มแพทย์">
+                            + เพิ่ม
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Activities */}
+                {dayActs.map(a=>(
+                  <div key={a.id} className="flex items-center gap-1 rounded px-1 mb-0.5 cursor-pointer"
+                    style={{background:a.color+"22",border:`1px solid ${a.color}55`}}
+                    onClick={e=>onActClick(e,ds)}>
+                    <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{backgroundColor:a.color}}/>
+                    <span style={{fontSize:8,color:a.color,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}
+                      title={a.title}>{a.title}</span>
+                  </div>
+                ))}
+                {/* Always-visible activity add chip */}
+                {!readOnly&&(
+                  <button type="button" onClick={e=>onActClick(e,ds)}
+                    title="เพิ่มกิจกรรม"
+                    className="mt-0.5 w-full flex items-center justify-center gap-0.5 rounded-md font-bold transition-all hover:opacity-80 active:scale-95"
+                    style={{fontSize:9,padding:"2px 4px",background:"#10b981",border:"none",color:"#fff",letterSpacing:"0.02em"}}>
+                    + กิจกรรม
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+
+      {/* Popups */}
+      {menu?.type==="chip"&&(
+        <ChipMenu x={menu.x} y={menu.y} assignment={menu.assignment} physician={menu.physician}
+          physicians={physicians} assignments={assignments} setAssignments={setAssignments} onClose={closeMenu}/>
+      )}
+      {menu?.type==="add"&&(
+        <AddSlotMenu x={menu.x} y={menu.y} date={menu.date} shift={menu.shift}
+          physicians={physicians} assignments={assignments} setAssignments={setAssignments} onClose={closeMenu}/>
+      )}
+      {menu?.type==="act"&&(
+        <ActivityMenu x={menu.x} y={menu.y} date={menu.date}
+          activities={activities} setActivities={setActivities} onClose={closeMenu}/>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   SCHEDULE PAGE
+═══════════════════════════════════════════════ */
+function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAssignments,activities,setActivities}){
+  const [errors,setErrors]=useState([]);
+  const [genMsg,setGenMsg]=useState("");
+  const [generating,setGenerating]=useState(false);
+
+  function prevMonth(){
+    if(month===1){setMonth(12);setYear(y=>y-1);}else setMonth(m=>m-1);
+  }
+  function nextMonth(){
+    if(month===12){setMonth(1);setYear(y=>y+1);}else setMonth(m=>m+1);
+  }
+
+  function handleGenerate(){
+    const errs=validateCanGenerate(physicians,year,month);
+    if(errs.length){setErrors(errs);setGenMsg("");return;}
+    setErrors([]);setGenerating(true);
+    setTimeout(()=>{
+      try{
+        const res=generateSchedule(physicians,year,month,assignments);
+        setAssignments(res.assignments);
+        setErrors(res.errors);
+        if(res.ok)setGenMsg("✓ สร้างตารางเวรสำเร็จ");
+        else setGenMsg(`⚠ สร้างตารางแล้ว แต่มี ${res.errors.length} ช่วงที่แพทย์ไม่เพียงพอ`);
+      }catch(e){setErrors([`เกิดข้อผิดพลาด: ${e.message}`]);}
+      finally{setGenerating(false);}
+    },80);
+  }
+
+  function handleResetManual(){
+    if(window.confirm("ล้างการแก้ไขด้วยตนเองทั้งหมด (คงไว้เฉพาะที่ล็อค)?"))
+      setAssignments(prev=>prev.filter(a=>a.isLocked));
+  }
+
+  function handleClearAll(){
+    if(window.confirm("ล้างตารางเวรทั้งหมดในเดือนนี้?"))
+      setAssignments(prev=>prev.filter(a=>!a.date.startsWith(`${year}-${String(month).padStart(2,'0')}`)));
+  }
+
+  function exportExcel(){
+    const days=daysInMonth(year,month);
+    const monthName=MONTHS[month-1];
+    const thaiYear=year+543;
+
+    // Build rows: each day may have multiple sub-rows (one per doctor in the largest shift)
+    let tableRows="";
+    for(let d=1;d<=days;d++){
+      const ds=dateStr(year,month,d);
+      const isWE=isWeekend(ds);
+      const dow=DOW_LABELS[new Date(ds).getDay()];
+      const rowBg=isWE?"#fef2f2":"#ffffff";
+
+      // Get doctors per shift
+      const shiftDoctors=SHIFTS.map(sh=>
+        assignments.filter(a=>a.date===ds&&a.shiftType===sh).map(a=>{
+          const p=physicians.find(x=>x.id===a.physicianId);
+          return p?{name:p.name,level:p.level,color:physColor(p.id)}:null;
+        }).filter(Boolean)
+      );
+      const maxRows=Math.max(1,...shiftDoctors.map(s=>s.length));
+
+      // Level background mapping
+      const lvBg={R3:"#fef9c3",R2:"#dcfce7",R1:"#dbeafe"};
+      const lvFg={R3:"#713f12",R2:"#166534",R1:"#1e40af"};
+
+      for(let r=0;r<maxRows;r++){
+        tableRows+="<tr>";
+        if(r===0){
+          tableRows+=`<td rowspan="${maxRows}" style="background:${rowBg};border:1px solid #ccc;padding:4px 6px;font-weight:bold;font-size:11px;vertical-align:middle;text-align:center;white-space:nowrap;">${d}<br/><span style="font-size:9px;color:#666;font-weight:normal;">${dow}</span></td>`;
+        }
+        for(const shDoctors of shiftDoctors){
+          const doc=shDoctors[r];
+          if(doc){
+            const bg=lvBg[doc.level]||"#f8fafc";
+            const fg=lvFg[doc.level]||"#1e293b";
+            tableRows+=`<td style="background:${bg};border:1px solid #ccc;padding:3px 6px;font-size:10px;font-weight:600;color:${fg};vertical-align:middle;">${doc.name}</td>`;
+          } else {
+            tableRows+=`<td style="background:${rowBg};border:1px solid #ccc;padding:3px;"></td>`;
+          }
+        }
+        tableRows+="</tr>";
+      }
+    }
+
+    const html=`<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="UTF-8"/>
+<!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>
+<x:Name>${monthName} ${thaiYear}</x:Name>
+<x:WorksheetOptions><x:Panes/></x:WorksheetOptions>
+</x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
+<style>
+  body{font-family:"TH Sarabun New",Sarabun,sans-serif;}
+  table{border-collapse:collapse;}
+  th{background:#e2e8f0;border:1px solid #999;padding:5px 8px;font-size:12px;font-weight:bold;}
+</style>
+</head><body>
+<h2 style="font-family:'TH Sarabun New',Sarabun,sans-serif;font-size:14px;margin:0 0 6px;">
+  ตารางเวรแพทย์ ER — ${monthName} ${thaiYear}
+</h2>
+<table>
+<thead>
+  <tr>
+    <th style="width:50px;">วัน</th>
+    <th style="width:160px;background:#bbf7d0;">เวรเช้า (08:00–16:00)</th>
+    <th style="width:160px;background:#bfdbfe;">เวรบ่าย (16:00–24:00)</th>
+    <th style="width:160px;background:#e9d5ff;">เวรดึก (00:00–08:00)</th>
+  </tr>
+</thead>
+<tbody>${tableRows}</tbody>
+</table>
+<br/>
+<table>
+<tr><td style="padding:2px 8px;font-size:10px;background:#fef9c3;border:1px solid #ccc;">R3</td>
+<td style="padding:2px 8px;font-size:10px;background:#dcfce7;border:1px solid #ccc;">R2</td>
+<td style="padding:2px 8px;font-size:10px;background:#dbeafe;border:1px solid #ccc;">R1</td></tr>
+</table>
+</body></html>`;
+
+    const blob=new Blob(["﻿"+html],{type:"application/vnd.ms-excel;charset=utf-8"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url;
+    a.download=`ตารางเวร_${monthName}_${thaiYear}.xls`;
+    document.body.appendChild(a);a.click();
+    setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},1000);
+  }
+
+  const monthPrefix=`${year}-${String(month).padStart(2,'0')}`;
+  const thisMonthA=assignments.filter(a=>a.date.startsWith(monthPrefix));
+  const manualCount=thisMonthA.filter(a=>a.isManual).length;
+
+  return(
+    <div className="p-4">
+      {/* Header */}
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <h1 className="text-2xl font-bold text-slate-800 mr-2">ตารางเวร</h1>
+
+        {/* Month selector */}
+        <div className="flex items-center gap-0.5 bg-white border border-slate-200 rounded-xl shadow-sm">
+          <button type="button" onClick={prevMonth}
+            className="px-3 py-2 hover:bg-slate-50 rounded-l-xl font-bold text-slate-500 text-lg transition-colors">‹</button>
+          <span className="px-3 font-bold text-slate-700 min-w-[110px] text-center text-sm">
+            {MONTHS[month-1]} {year+543}
+          </span>
+          <button type="button" onClick={nextMonth}
+            className="px-3 py-2 hover:bg-slate-50 rounded-r-xl font-bold text-slate-500 text-lg transition-colors">›</button>
+        </div>
+
+        <div className="flex-1"/>
+        <Btn onClick={handleGenerate} variant="primary" disabled={generating}>
+          {generating?"⏳ กำลังสร้าง...":"⚡ สร้างตาราง"}
+        </Btn>
+        <Btn onClick={exportExcel} variant="secondary">📊 Export Excel</Btn>
+        <Btn onClick={handleResetManual} variant="secondary">↺ ล้างแก้ไข</Btn>
+        <Btn onClick={handleClearAll} variant="danger">🗑 ล้างเดือนนี้</Btn>
+      </div>
+
+      {/* Status messages */}
+      {genMsg&&(
+        <div className={`mb-3 px-4 py-2.5 rounded-xl text-sm font-semibold border
+          ${genMsg.startsWith("✓")
+            ?"bg-emerald-50 text-emerald-700 border-emerald-200"
+            :"bg-amber-50 text-amber-700 border-amber-200"}`}>
+          {genMsg}
+        </div>
+      )}
+      {errors.length>0&&(
+        <div className="mb-3 bg-red-50 border border-red-200 rounded-xl p-4">
+          <div className="font-bold text-red-700 text-sm mb-2">⛔ ข้อผิดพลาด ({errors.length} รายการ)</div>
+          <ul className="list-disc list-inside text-xs text-red-600 space-y-0.5 max-h-36 overflow-y-auto">
+            {errors.map((e,i)=><li key={i}>{e}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {/* Stats bar */}
+      <div className="flex gap-2 mb-3 flex-wrap">
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-1.5 text-xs flex items-center gap-1.5">
+          <span className="text-blue-400">📅</span>
+          <span className="text-blue-600 font-semibold">เวรเดือนนี้:</span>
+          <span className="font-bold text-blue-800">{thisMonthA.length}</span>
+        </div>
+        <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-1.5 text-xs flex items-center gap-1.5">
+          <span className="text-green-400">👨‍⚕️</span>
+          <span className="text-green-600 font-semibold">แพทย์:</span>
+          <span className="font-bold text-green-800">{physicians.length} คน</span>
+        </div>
+        {manualCount>0&&(
+          <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-1.5 text-xs flex items-center gap-1.5">
+            <span className="text-amber-500 font-semibold">✏ แก้ไขเอง:</span>
+            <span className="font-bold text-amber-800">{manualCount} รายการ</span>
+          </div>
+        )}
+      </div>
+
+      <Card className="overflow-hidden">
+        <MonthlyCalendar year={year} month={month} physicians={physicians}
+          assignments={assignments} setAssignments={setAssignments}
+          activities={activities} setActivities={setActivities}/>
+      </Card>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   PHYSICIAN VIEW
+═══════════════════════════════════════════════ */
+function PhysicianView({physicians,year,month,assignments}){
+  const [selId,setSelId]=useState("");
+  const p=useMemo(()=>physicians.find(x=>x.id===selId),[selId,physicians]);
+  const days=daysInMonth(year,month);
+  const firstDow=new Date(year,month-1,1).getDay();
+  const monthPrefix=`${year}-${String(month).padStart(2,'0')}`;
+  const myA=useMemo(()=>assignments.filter(a=>a.physicianId===selId&&a.date.startsWith(monthPrefix)),[selId,assignments,monthPrefix]);
+
+  const cells=[];
+  for(let i=0;i<firstDow;i++)cells.push(null);
+  for(let d=1;d<=days;d++)cells.push(d);
+  while(cells.length%7!==0)cells.push(null);
+  const rows=[];
+  for(let i=0;i<cells.length;i+=7)rows.push(cells.slice(i,i+7));
+
+  const lvColor={R1:"blue",R2:"green",R3:"yellow"};
+  const shiftColors={morning:{bg:"#dbeafe",c:"#1d4ed8"},evening:{bg:"#dcfce7",c:"#166534"},night:{bg:"#ede9fe",c:"#5b21b6"}};
+
+  return(
+    <div className="p-4 max-w-3xl mx-auto">
+      <h1 className="text-2xl font-bold text-slate-800 mb-4">ตารางเวรรายบุคคล</h1>
+      <Card className="p-5 mb-4">
+        <Field label="เลือกแพทย์">
+          <select value={selId} onChange={e=>setSelId(e.target.value)}
+            className="border border-slate-300 rounded-lg px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-blue-400 bg-white">
+            <option value="">-- เลือกแพทย์ --</option>
+            {physicians.map(ph=><option key={ph.id} value={ph.id}>{ph.name} ({ph.level})</option>)}
+          </select>
+        </Field>
+        {p&&(
+          <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-slate-100">
+            <div className="flex items-center gap-2">
+              <span className="w-4 h-4 rounded-full" style={{backgroundColor:physColor(p.id).bg,border:`2px solid ${physColor(p.id).bd}`}}/>
+              <span className="font-bold text-slate-800">{p.name}</span>
+            </div>
+            <Badge color={lvColor[p.level]}>{p.level}</Badge>
+            <Badge color="purple">{p.rotation||"วนนอก"}</Badge>
+            <div className="flex gap-3 ml-auto text-sm">
+              <span className="text-slate-500">เวรเดือนนี้: <strong className="text-blue-700">{myA.length}</strong></span>
+              <span className="text-slate-500">Target: <strong>{p.targetShifts}</strong></span>
+              <span className={`font-semibold ${myA.length>=p.targetShifts?"text-green-600":"text-amber-600"}`}>
+                {myA.length>=p.targetShifts?"✓ ครบ":"ยังไม่ครบ"}
+              </span>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {p&&(
+        <Card className="overflow-hidden">
+          <div className="grid grid-cols-7 bg-slate-50 border-b border-slate-200">
+            {DOW_LABELS.map((d,i)=>(
+              <div key={d} className={`text-center py-2 text-xs font-bold ${i===0||i===6?"text-red-500":"text-slate-500"}`}>{d}</div>
+            ))}
+          </div>
+          {rows.map((row,ri)=>(
+            <div key={ri} className="grid grid-cols-7">
+              {row.map((d,ci)=>{
+                if(!d)return<div key={ci} className="border-r border-b border-slate-200 bg-slate-50/60" style={{minHeight:90}}/>;
+                const ds=dateStr(year,month,d);
+                const dayA=myA.filter(a=>a.date===ds);
+                const isOff=(p.daysOff||[]).includes(ds);
+                const isWE=isWeekend(ds);
+                const hasWork=dayA.length>0;
+                return(
+                  <div key={ci}
+                    className={`border-r border-b border-slate-200 p-2 ${isOff?"bg-red-50":hasWork?"bg-blue-50/40":isWE?"bg-rose-50/20":"bg-white"}`}
+                    style={{minHeight:90}}>
+                    <div className={`text-xs font-bold mb-1 ${isWE?"text-red-400":"text-slate-700"}`}>{d}</div>
+                    {isOff&&<div className="text-xs text-red-500 font-bold bg-red-100 rounded px-1">หยุด</div>}
+                    {dayA.map(a=>(
+                      <div key={a.id} className="text-xs font-bold px-1 py-0.5 rounded mb-0.5 text-center"
+                        style={{background:shiftColors[a.shiftType].bg,color:shiftColors[a.shiftType].c}}>
+                        {SH_SHORT[a.shiftType]}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {!selId&&(
+        <Card className="p-12 text-center">
+          <div className="text-5xl mb-3">🗓</div>
+          <div className="text-slate-500">เลือกแพทย์เพื่อดูตารางเวรรายบุคคล</div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   DASHBOARD
+═══════════════════════════════════════════════ */
+function Dashboard({physicians,year,month,assignments,activities}){
+  const days=daysInMonth(year,month);
+  const monthPrefix=`${year}-${String(month).padStart(2,'0')}`;
+  const monthA=useMemo(()=>assignments.filter(a=>a.date.startsWith(monthPrefix)),[assignments,monthPrefix]);
+  const total=monthA.length;
+  const avg=physicians.length?(Math.round(total/physicians.length*10)/10):0;
+
+  const firstDow=new Date(year,month-1,1).getDay();
+  const cells=[];
+  for(let i=0;i<firstDow;i++)cells.push(null);
+  for(let d=1;d<=days;d++)cells.push(d);
+  while(cells.length%7!==0)cells.push(null);
+
+  const lvColor={R1:"blue",R2:"green",R3:"yellow"};
+
+  return(
+    <div className="p-4 max-w-6xl mx-auto">
+      <div className="flex items-center justify-between mb-5">
+        <h1 className="text-2xl font-bold text-slate-800">แดชบอร์ด</h1>
+        <Badge color="slate">{MONTHS[month-1]} {year+543}</Badge>
+      </div>
+
+      {/* Summary cards */}
+      <div className="grid grid-cols-3 gap-4 mb-6">
+        <Card className="p-5 text-center">
+          <div className="text-4xl font-black text-blue-600 mb-1">{physicians.length}</div>
+          <div className="text-sm text-slate-500 font-medium">แพทย์ทั้งหมด</div>
+        </Card>
+        <Card className="p-5 text-center">
+          <div className="text-4xl font-black text-emerald-600 mb-1">{total}</div>
+          <div className="text-sm text-slate-500 font-medium">เวรทั้งหมดเดือนนี้</div>
+        </Card>
+        <Card className="p-5 text-center">
+          <div className="text-4xl font-black text-violet-600 mb-1">{avg}</div>
+          <div className="text-sm text-slate-500 font-medium">เฉลี่ยเวร/คน</div>
+        </Card>
+      </div>
+
+      {physicians.length===0&&(
+        <Card className="p-12 text-center text-slate-400">
+          <div className="text-5xl mb-3">📊</div>
+          <div>ยังไม่มีข้อมูลแพทย์</div>
+        </Card>
+      )}
+
+      {/* Per physician grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        {physicians.map(p=>{
+          const pa=monthA.filter(a=>a.physicianId===p.id);
+          const daysOff=(p.daysOff||[]).filter(d=>d.startsWith(monthPrefix)).length;
+          const free=Math.max(0,days-pa.length-daysOff);
+          const col=physColor(p.id);
+          const pct=p.targetShifts?Math.min(100,Math.round(pa.length/p.targetShifts*100)):0;
+          return(
+            <Card key={p.id} className="p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-4 h-4 rounded-full flex-shrink-0 shadow"
+                  style={{backgroundColor:col.bg,border:`2px solid ${col.bd}`}}/>
+                <span className="font-bold text-slate-800 flex-1 text-sm truncate">{p.name}</span>
+                <Badge color={lvColor[p.level]}>{p.level}</Badge>
+                <Badge color="purple">{ROT_SHORT[p.rotation||"วนนอก"]}</Badge>
+              </div>
+
+              {/* Stats row */}
+              <div className="grid grid-cols-3 gap-1.5 mb-3">
+                <div className="bg-blue-50 rounded-lg p-2 text-center">
+                  <div className="text-base font-black text-blue-700">{pa.length}</div>
+                  <div className="text-xs text-blue-500">เวร</div>
+                </div>
+                <div className="bg-red-50 rounded-lg p-2 text-center">
+                  <div className="text-base font-black text-red-700">{daysOff}</div>
+                  <div className="text-xs text-red-500">หยุด</div>
+                </div>
+                <div className="bg-slate-50 rounded-lg p-2 text-center">
+                  <div className="text-base font-black text-slate-600">{free}</div>
+                  <div className="text-xs text-slate-400">ว่าง</div>
+                </div>
+              </div>
+
+              {/* Progress bar */}
+              <div className="mb-3">
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="text-slate-500">ความคืบหน้า</span>
+                  <span className="font-semibold" style={{color:col.bg}}>{pa.length}/{p.targetShifts}</span>
+                </div>
+                <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full transition-all"
+                    style={{width:`${pct}%`,backgroundColor:col.bg}}/>
+                </div>
+              </div>
+
+              {/* Mini calendar */}
+              <div className="grid grid-cols-7 gap-px">
+                {["อ","จ","อ","พ","พ","ศ","ส"].map((d,i)=>(
+                  <div key={i} style={{fontSize:6,textAlign:"center",color:"#94a3b8",fontWeight:700}}>{DOW_LABELS[i]}</div>
+                ))}
+                {cells.map((d,i)=>{
+                  if(!d)return<div key={i} style={{aspectRatio:"1",borderRadius:2}}/>;
+                  const ds=dateStr(year,month,d);
+                  const hasShift=monthA.some(a=>a.physicianId===p.id&&a.date===ds);
+                  const isDayOff=(p.daysOff||[]).includes(ds);
+                  const isWE=isWeekend(ds);
+                  let bg="#f1f5f9",tc="#94a3b8";
+                  if(hasShift){bg=col.bg;tc=col.fg;}
+                  else if(isDayOff){bg="#fecaca";tc="#b91c1c";}
+                  else if(isWE){bg="#fee2e2";tc="#fca5a5";}
+                  return(
+                    <div key={i} title={ds}
+                      style={{aspectRatio:"1",background:bg,color:tc,fontSize:6,fontWeight:700,
+                        textAlign:"center",borderRadius:3,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                      {d}
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Legend */}
+              <div className="flex gap-3 mt-2">
+                {[{bg:col.bg,label:"เวร"},{bg:"#fecaca",label:"หยุด"},{bg:"#f1f5f9",label:"ว่าง"}].map(({bg,label})=>(
+                  <span key={label} className="flex items-center gap-1">
+                    <span style={{width:8,height:8,borderRadius:2,display:"inline-block",backgroundColor:bg}}/>
+                    <span style={{fontSize:8,color:"#94a3b8"}}>{label}</span>
+                  </span>
+                ))}
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   DEFAULT PHYSICIANS (pre-seeded from rotation schedule)
+   ER ปก = วนใน | other dept = วนนอก | ER ปก/Xray = วนนอกครึ่งเดือนหลัง
+═══════════════════════════════════════════════ */
+const DEFAULT_PHYSICIANS=[
+  // ── R3 (วนใน) — อภิญญา+ธนวัฒน์ promoted from R2 ──────────
+  {id:"p_r3_01",name:"อภิญญา",level:"R3",rotation:"วนใน",targetShifts:23,minShifts:21,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p_r3_02",name:"ธนวัฒน์",level:"R3",rotation:"วนใน",targetShifts:23,minShifts:21,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  // ── R2 (วนใน) — promoted from R1 ─────────────────────────
+  {id:"p_r2_01",name:"เปมิกา",level:"R2",rotation:"วนใน",targetShifts:24,minShifts:22,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p_r2_02",name:"ชนิกานต์",level:"R2",rotation:"วนใน",targetShifts:24,minShifts:22,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p_r2_03",name:"พิมพ์ลดา",level:"R2",rotation:"วนใน",targetShifts:24,minShifts:22,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p_r2_04",name:"จิรพนธ์",level:"R2",rotation:"วนใน",targetShifts:24,minShifts:22,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p_r2_05",name:"มาะ",level:"R2",rotation:"วนใน",targetShifts:24,minShifts:22,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  // ── R1 (วนใน) ─────────────────────────────────────────────
+  {id:"p_r1_01",name:"ปานตะวัน",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p_r1_02",name:"ไชยวัฒน์",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p_r1_03",name:"ปภัสรา",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p_r1_04",name:"ภูมิ",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p_r1_05",name:"นรินทร์",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p_r1_06",name:"กฤษณปณต",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p_r1_07",name:"ศุภรพัชร์",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+];
+
+/* ═══════════════════════════════════════════════
+   APP ROOT
+═══════════════════════════════════════════════ */
+function App(){
+  const now=new Date();
+  const [page,setPage]=useState("schedule");
+  const [year,setYear]=useState(now.getFullYear());
+  const [month,setMonth]=useState(now.getMonth()+1);
+  // Clear stale localStorage when file version changes
+  const _isNewVersion=loadLS("erpk_version",null)!==LS_VERSION;
+  if(_isNewVersion){
+    saveLS("erpk_version",LS_VERSION);
+    saveLS("erpk_physicians",[]);
+    saveLS("erpk_assignments",[]);
+  }
+  const [physicians,setPhysicians]=useState(()=>{
+    const saved=loadLS("erpk_physicians",null);
+    if(!saved||saved.length===0)return DEFAULT_PHYSICIANS;
+    return saved;
+  });
+  const [assignments,setAssignments]=useState(()=>_isNewVersion?[]:loadLS("erpk_assignments",[]));
+  const [activities,setActivities]=useState(()=>loadLS("erpk_activities",[]));
+
+  useEffect(()=>saveLS("erpk_physicians",physicians),[physicians]);
+  useEffect(()=>saveLS("erpk_assignments",assignments),[assignments]);
+  useEffect(()=>saveLS("erpk_activities",activities),[activities]);
+
+  const NAV=[
+    {id:"schedule",icon:"📅",label:"ตารางเวร"},
+    {id:"physicians",icon:"👨‍⚕️",label:"แพทย์"},
+    {id:"staff",icon:"🙋",label:"พอร์ทัลแพทย์"},
+    {id:"physicianview",icon:"👤",label:"รายบุคคล"},
+    {id:"dashboard",icon:"📊",label:"แดชบอร์ด"},
+  ];
+
+  return(
+    <div className="min-h-screen bg-slate-100">
+      {/* Navigation */}
+      <nav className="bg-white border-b border-slate-200 shadow-sm sticky top-0 z-40">
+        <div className="max-w-screen-2xl mx-auto px-4 flex items-center h-14 gap-1">
+          {/* Logo */}
+          <div className="flex items-center gap-2 mr-4 flex-shrink-0">
+            <span className="text-2xl">🏥</span>
+            <span className="font-black text-blue-700 text-lg tracking-tight">ERPK</span>
+            <span className="text-xs text-slate-400 font-medium hidden sm:block">ระบบจัดเวรแพทย์</span>
+          </div>
+
+          {/* Nav tabs */}
+          <div className="flex gap-1 flex-1 overflow-x-auto">
+            {NAV.map(n=>(
+              <button key={n.id} type="button" onClick={()=>setPage(n.id)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-semibold whitespace-nowrap transition-all
+                  ${page===n.id
+                    ?"bg-blue-600 text-white shadow-sm"
+                    :"text-slate-600 hover:bg-slate-100 hover:text-slate-800"}`}>
+                <span>{n.icon}</span>
+                <span className="hidden sm:inline">{n.label}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Month badge */}
+          <div className="flex-shrink-0 text-xs text-slate-400 font-medium ml-2 hidden md:block px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg">
+            {MONTHS[month-1]} {year+543}
+          </div>
+        </div>
+      </nav>
+
+      {/* Page */}
+      <main className="max-w-screen-2xl mx-auto">
+        {page==="schedule"&&(
+          <SchedulePage physicians={physicians} year={year} month={month}
+            setYear={setYear} setMonth={setMonth}
+            assignments={assignments} setAssignments={setAssignments}
+            activities={activities} setActivities={setActivities}/>
+        )}
+        {page==="physicians"&&(
+          <PhysiciansPage physicians={physicians} setPhysicians={setPhysicians}
+            year={year} month={month}/>
+        )}
+        {page==="staff"&&(
+          <StaffPortal physicians={physicians} setPhysicians={setPhysicians}
+            year={year} month={month}/>
+        )}
+        {page==="physicianview"&&(
+          <PhysicianView physicians={physicians} year={year} month={month}
+            assignments={assignments}/>
+        )}
+        {page==="dashboard"&&(
+          <Dashboard physicians={physicians} year={year} month={month}
+            assignments={assignments} activities={activities}/>
+        )}
+      </main>
+    </div>
+  );
+}
+
+const root=ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);
+</script>
+</body>
+</html>
