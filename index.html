@@ -267,7 +267,10 @@ function generateSchedule(physicians,year,month,existingAssignments){
         // Hard block: same-day consecutive conflict
         !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
         // Hard block: วนนอก period doctors cannot work weekends (Fri=5/Sat=6/Sun=0)
-        !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))
+        !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
+        // Hard cap: วนนอกครึ่งเดือน → max 3 shifts in the นอก half (≈1-2/week)
+        !((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&
+          isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=3)
       );
 
       // Sort: 0) CHIEF REQUIRED if slot has none — chiefs always sorted first until one is placed
@@ -318,9 +321,10 @@ function generateSchedule(physicians,year,month,existingAssignments){
         if(aVanNok||bVanNok){
           const aHalf=aVanNok?vanNokHalfShiftCount(a.id,date,newAssignments):0;
           const bHalf=bVanNok?vanNokHalfShiftCount(b.id,date,newAssignments):0;
-          // Soft cap at 6 shifts in วนนอก half (≈2-3/week)
-          if(aHalf>=6&&bHalf<6)return 1;
-          if(bHalf>=6&&aHalf<6)return -1;
+          // Soft cap: ครึ่งเดือน = 3 shifts in นอก half, วนนอก = 99 (no per-half cap)
+          const cap=(r)=>(r==="วนนอกครึ่งเดือนแรก"||r==="วนนอกครึ่งเดือนหลัง")?3:99;
+          if(aHalf>=cap(a.rotation)&&bHalf<cap(b.rotation))return 1;
+          if(bHalf>=cap(b.rotation)&&aHalf<cap(a.rotation))return -1;
         }
 
         const aDiff=(shiftCounts[a.id]||0)-(a.targetShifts||0);
@@ -1831,7 +1835,14 @@ const DEFAULT_PHYSICIANS=[
   {id:"p4", name:"ชนิกานต์",  level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
   {id:"p5", name:"พิมพ์ลดา",  level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
   {id:"p6", name:"จิรพนธ์",   level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
-  {id:"p7", name:"มาะ",       level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
+  {id:"p7", name:"มาะ",        level:"R2", rotation:"วนใน",  minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
+  {id:"p8", name:"ปานตะวัน",  level:"R1", rotation:"วนนอก", minShifts:5,  targetShifts:7,  maxShifts:10, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["evening"]},
+  {id:"p9", name:"ไชยวัฒน์",  level:"R1", rotation:"วนนอก", minShifts:5,  targetShifts:7,  maxShifts:10, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["evening"]},
+  {id:"p10",name:"ปภัสรา",    level:"R1", rotation:"วนนอก", minShifts:5,  targetShifts:7,  maxShifts:10, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["evening"]},
+  {id:"p11",name:"ภูมิ",      level:"R1", rotation:"วนนอก", minShifts:5,  targetShifts:7,  maxShifts:10, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["evening"]},
+  {id:"p12",name:"นรินทร์",   level:"R1", rotation:"วนนอก", minShifts:5,  targetShifts:7,  maxShifts:10, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["evening"]},
+  {id:"p13",name:"กฤษณปณต",  level:"R1", rotation:"วนนอก", minShifts:5,  targetShifts:7,  maxShifts:10, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["evening"]},
+  {id:"p14",name:"ศุภรพัชร์", level:"R1", rotation:"วนนอก", minShifts:5,  targetShifts:7,  maxShifts:10, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["evening"]},
 ];
 
 /* ═══════════════════════════════════════════════
@@ -1872,7 +1883,14 @@ function App(){
           cloudGet('assignments'),
           cloudGet('activities'),
         ]);
-        if (cp && cp.length > 0) { setPhysicians(cp); saveLS('erpk_physicians', cp); }
+        if (cp && cp.length > 0) {
+          // Merge: keep cloud data but add any new doctors from DEFAULT_PHYSICIANS not yet in cloud
+          const existingIds = new Set(cp.map(p=>p.id));
+          const merged = [...cp, ...DEFAULT_PHYSICIANS.filter(p=>!existingIds.has(p.id))];
+          setPhysicians(merged); saveLS('erpk_physicians', merged);
+          // Push merged list back to cloud so it's saved
+          cloudSet('physicians', merged);
+        }
         if (ca && ca.length > 0) { setAssignments(ca); saveLS('erpk_assignments', ca); }
         if (cact && cact.length > 0) { setActivities(cact); saveLS('erpk_activities_v11', cact); }
       } catch {}
