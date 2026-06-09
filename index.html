@@ -174,8 +174,8 @@ function isInVanNokPeriod(physician,date){
   const day=+date.slice(8);
   const rot=physician.rotation||"วนนอก";
   if(rot==="วนนอก")return true;
-  if(rot==="วนนอกครึ่งเดือนแรก")return day>15;   // วนนอก = second half 16-30
-  if(rot==="วนนอกครึ่งเดือนหลัง")return day<=15;  // วนนอก = first half 1-15
+  if(rot==="วนนอกครึ่งเดือนแรก")return day<=15;   // วนนอก = first half 1-15
+  if(rot==="วนนอกครึ่งเดือนหลัง")return day>15;   // วนนอก = second half 16-30
   return false;
 }
 
@@ -198,16 +198,14 @@ function isAvailableForSlot_raw(physician,date,shiftType){
   const rot=physician.rotation||"วนนอก";
   if(rot==="วนนอก") return shiftType==="evening";
   if(rot==="วนนอกครึ่งเดือนแรก"){
-    // วนใน period = days 1-15 (all shifts, majority of shifts here)
-    // วนนอก period = days 16-30 (evening only, 2-3/week max)
-    if(day<=15) return true;
-    return shiftType==="evening";
+    // วนนอก = days 1-15 (evening only), วนใน = days 16-30 (all shifts, priority)
+    if(day<=15) return shiftType==="evening";
+    return true;
   }
   if(rot==="วนนอกครึ่งเดือนหลัง"){
-    // วนนอก period = days 1-15 (evening only, 2-3/week max)
-    // วนใน period = days 16-30 (all shifts, majority of shifts here)
-    if(day>15) return true;
-    return shiftType==="evening";
+    // วนใน = days 1-15 (all shifts, priority), วนนอก = days 16-30 (evening only)
+    if(day>15) return shiftType==="evening";
+    return true;
   }
   return true; // วนใน: all shifts
 }
@@ -1910,7 +1908,6 @@ function App(){
   const NAV=[
     {id:"schedule",icon:"📅",label:"ตารางเวร"},
     {id:"physicians",icon:"👨‍⚕️",label:"แพทย์"},
-    {id:"staff",icon:"🙋",label:"พอร์ทัลแพทย์"},
     {id:"physicianview",icon:"👤",label:"รายบุคคล"},
     {id:"dashboard",icon:"📊",label:"แดชบอร์ด"},
   ];
@@ -1985,10 +1982,6 @@ function App(){
         )}
         {page==="physicians"&&(
           <PhysiciansPage physicians={physicians} setPhysicians={setPhysicians}
-            year={year} month={month}/>
-        )}
-        {page==="staff"&&(
-          <StaffPortal physicians={physicians} setPhysicians={setPhysicians}
             year={year} month={month}/>
         )}
         {page==="physicianview"&&(
