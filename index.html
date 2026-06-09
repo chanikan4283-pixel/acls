@@ -8,7 +8,6 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 <style>
 body{font-family:'Segoe UI',Tahoma,sans-serif;background:#f1f5f9;}
 .chip{display:inline-flex;align-items:center;padding:1px 7px;border-radius:999px;font-size:10px;font-weight:700;border:1.5px solid;cursor:pointer;white-space:nowrap;margin:1px;line-height:1.6;transition:opacity 0.1s;}
@@ -25,7 +24,8 @@ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#f1f5f9;}
 <script type="text/babel">
 const {useState,useEffect,useRef,useMemo}=React;
 
-const LS_VERSION="v10";
+const LS_VERSION="v12";
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzrdWOxfIPsZOG6bjytZoi1Bilcrbx1RPtazgyIO3cfq5elf6SEEssRTCgGuaWo54Yxig/exec";
 
 /* ═══════════════════════════════════════════════
    CONSTANTS
@@ -80,6 +80,23 @@ function isChief(p){return p.level==="R2"||p.level==="R3";}
 function loadLS(k,d){try{const v=localStorage.getItem(k);return v!==null?JSON.parse(v):d;}catch{return d;}}
 function saveLS(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch{}}
 
+async function cloudGet(key) {
+  if (!SCRIPT_URL) return null;
+  try {
+    const r = await fetch(`${SCRIPT_URL}?key=${key}`);
+    return await r.json();
+  } catch { return null; }
+}
+async function cloudSet(key, value) {
+  if (!SCRIPT_URL) return;
+  try {
+    await fetch(SCRIPT_URL, {
+      method: 'POST',
+      body: JSON.stringify({key, value}),
+    });
+  } catch {}
+}
+
 // Returns true if doctor can ONLY work this shift today (e.g. วนนอก for evening)
 function isRestrictedToShift(p,date,shift){
   return SHIFTS.filter(s=>s!==shift).every(s=>!isAvailableForSlot_raw(p,date,s));
@@ -89,6 +106,11 @@ function isRestrictedToShift(p,date,shift){
 //   ดึก→เช้า same day, เช้า→บ่าย same day, บ่าย day N → ดึก day N+1
 // Allowed 8เว้น8 (gap = 8hr):
 //   เช้า→ดึก next day, ดึก→บ่าย same day, บ่าย→เช้า next day
+function isConsecutiveConflict(existingShift,newShift){
+  // evening blocks both morning and night; morning blocks evening; night blocks evening
+  const blocks={morning:["evening"],evening:["morning","night"],night:["evening"]};
+  return (blocks[existingShift]||[]).includes(newShift);
+}
 function hasImmediateConflict(physicianId,date,shiftType,assignments){
   const newR=shiftEpochRange(date,shiftType);
   return assignments.some(a=>{
@@ -211,6 +233,7 @@ function validateCanGenerate(physicians,year,month){
 
 function generateSchedule(physicians,year,month,existingAssignments){
   const errors=[];
+  const warnings=[];
   const fixed=existingAssignments.filter(a=>a.isLocked||a.isManual);
   const newAssignments=[...fixed];
   const shiftCounts={};
@@ -240,6 +263,8 @@ function generateSchedule(physicians,year,month,existingAssignments){
         isAvailableForSlot(p,date,shift)&&
         // Hard block: forbidden 0-hr gaps (เช้า→บ่าย, ดึก→เช้า same day, บ่าย→ดึก cross-day)
         !hasImmediateConflict(p.id,date,shift,newAssignments)&&
+        // Hard block: same-day consecutive conflict
+        !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
         // Hard block: วนนอก period doctors cannot work weekends (Fri=5/Sat=6/Sun=0)
         !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))
       );
@@ -395,7 +420,8 @@ function generateSchedule(physicians,year,month,existingAssignments){
         !hasImmediateConflict(p.id,date,shift,newAssignments)
       );
       if(chiefPool.length===0){
-        errors.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: ไม่สามารถหา Chief (R2/R3) ได้ — R1 อยู่คนเดียว`);
+        // Soft: no chief available for this slot — allowed (amber warning only, not a hard error)
+        warnings.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: ไม่มี Chief (R2/R3) ในเวรนี้`);
         continue;
       }
       chiefPool.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
@@ -458,7 +484,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
   // Post-processing: cluster rest days into pairs
   clusterRestDays(physicians,newAssignments,year,month);
 
-  return{ok:errors.length===0,assignments:newAssignments,errors};
+  return{ok:errors.length===0,assignments:newAssignments,errors,warnings};
 }
 
 /* ── Post-process: cluster isolated rest days ───────────────── */
@@ -993,6 +1019,7 @@ function ChipMenu({x,y,assignment,physician,physicians,assignments,setAssignment
       <div className="px-3 py-2.5 border-b border-slate-100">
         <div className="flex items-center gap-1.5">
           {outsideRot&&<span className="text-amber-500 text-sm">⚠</span>}
+          {assignment.isManual&&<span title="แก้ไขด้วยตนเอง (ล็อค)" className="text-sm">🔒</span>}
           <span className="font-bold text-sm text-slate-800">{physician?.name}</span>
           <Badge color={{R1:"blue",R2:"green",R3:"yellow"}[physician?.level]}>{physician?.level}</Badge>
         </div>
@@ -1292,6 +1319,7 @@ function MonthlyCalendar({year,month,physicians,assignments,setAssignments,activ
                               onClick={e=>onChipClick(e,a,phys)}
                               title={`${phys.name}${outside?" (⚠ นอกรูปแบบ)":""}`}>
                               {outside&&<span style={{fontSize:8,marginRight:1}}>⚠</span>}
+                              {a.isManual&&<span style={{fontSize:8,marginRight:1}}>🔒</span>}
                               {phys.name.replace(/^(นพ\.|พญ\.)\s*/,'')}
                             </span>
                           );
@@ -1376,7 +1404,8 @@ function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAss
         const res=generateSchedule(physicians,year,month,assignments);
         setAssignments(res.assignments);
         setErrors(res.errors);
-        if(res.ok)setGenMsg("✓ สร้างตารางเวรสำเร็จ");
+        const warnN=(res.warnings||[]).length;
+        if(res.ok)setGenMsg(warnN?`✓ สร้างตารางเวรสำเร็จ (มี ${warnN} เวรที่ไม่มี Chief)`:"✓ สร้างตารางเวรสำเร็จ");
         else setGenMsg(`⚠ สร้างตารางแล้ว แต่มี ${res.errors.length} ช่วงที่แพทย์ไม่เพียงพอ`);
       }catch(e){setErrors([`เกิดข้อผิดพลาด: ${e.message}`]);}
       finally{setGenerating(false);}
@@ -1385,7 +1414,7 @@ function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAss
 
   function handleResetManual(){
     if(window.confirm("ล้างการแก้ไขด้วยตนเองทั้งหมด (คงไว้เฉพาะที่ล็อค)?"))
-      setAssignments(prev=>prev.filter(a=>a.isLocked));
+      setAssignments(prev=>prev.map(a=>a.isLocked?a:(a.isManual?{...a,isManual:false}:a)));
   }
 
   function handleClearAll(){
@@ -1795,23 +1824,13 @@ function Dashboard({physicians,year,month,assignments,activities}){
    ER ปก = วนใน | other dept = วนนอก | ER ปก/Xray = วนนอกครึ่งเดือนหลัง
 ═══════════════════════════════════════════════ */
 const DEFAULT_PHYSICIANS=[
-  // ── R3 (วนใน) — อภิญญา+ธนวัฒน์ promoted from R2 ──────────
-  {id:"p_r3_01",name:"อภิญญา",level:"R3",rotation:"วนใน",targetShifts:23,minShifts:21,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  {id:"p_r3_02",name:"ธนวัฒน์",level:"R3",rotation:"วนใน",targetShifts:23,minShifts:21,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  // ── R2 (วนใน) — promoted from R1 ─────────────────────────
-  {id:"p_r2_01",name:"เปมิกา",level:"R2",rotation:"วนใน",targetShifts:24,minShifts:22,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  {id:"p_r2_02",name:"ชนิกานต์",level:"R2",rotation:"วนใน",targetShifts:24,minShifts:22,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  {id:"p_r2_03",name:"พิมพ์ลดา",level:"R2",rotation:"วนใน",targetShifts:24,minShifts:22,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  {id:"p_r2_04",name:"จิรพนธ์",level:"R2",rotation:"วนใน",targetShifts:24,minShifts:22,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  {id:"p_r2_05",name:"มาะ",level:"R2",rotation:"วนใน",targetShifts:24,minShifts:22,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  // ── R1 (วนใน) ─────────────────────────────────────────────
-  {id:"p_r1_01",name:"ปานตะวัน",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  {id:"p_r1_02",name:"ไชยวัฒน์",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  {id:"p_r1_03",name:"ปภัสรา",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  {id:"p_r1_04",name:"ภูมิ",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  {id:"p_r1_05",name:"นรินทร์",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  {id:"p_r1_06",name:"กฤษณปณต",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
-  {id:"p_r1_07",name:"ศุภรพัชร์",level:"R1",rotation:"วนใน",targetShifts:25,minShifts:23,maxShifts:31,daysOff:[],preferredShifts:["morning","evening","night"],shiftsOff:[]},
+  {id:"p1", name:"อภิญญา",    level:"R3", rotation:"วนใน", minShifts:21, targetShifts:23, maxShifts:26, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
+  {id:"p2", name:"ธนวัฒน์",   level:"R3", rotation:"วนใน", minShifts:21, targetShifts:23, maxShifts:26, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
+  {id:"p3", name:"เปมิกา",    level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
+  {id:"p4", name:"ชนิกานต์",  level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
+  {id:"p5", name:"พิมพ์ลดา",  level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
+  {id:"p6", name:"จิรพนธ์",   level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
+  {id:"p7", name:"มาะ",       level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
 ];
 
 /* ═══════════════════════════════════════════════
@@ -1835,11 +1854,55 @@ function App(){
     return saved;
   });
   const [assignments,setAssignments]=useState(()=>_isNewVersion?[]:loadLS("erpk_assignments",[]));
-  const [activities,setActivities]=useState(()=>loadLS("erpk_activities",[]));
+  const [activities,setActivities]=useState(()=>{ try{return JSON.parse(localStorage.getItem("erpk_activities_v11")||"[]")}catch{return []} });
+  const [loading,setLoading]=useState(true);
+  const [syncStatus,setSyncStatus]=useState("idle"); // "idle"|"saving"|"saved"|"error"
 
   useEffect(()=>saveLS("erpk_physicians",physicians),[physicians]);
   useEffect(()=>saveLS("erpk_assignments",assignments),[assignments]);
-  useEffect(()=>saveLS("erpk_activities",activities),[activities]);
+  React.useEffect(()=>{ localStorage.setItem("erpk_activities_v11", JSON.stringify(activities)); }, [activities]);
+
+  useEffect(() => {
+    async function loadFromCloud() {
+      if (!SCRIPT_URL) { setLoading(false); return; }
+      try {
+        const [cp, ca, cact] = await Promise.all([
+          cloudGet('physicians'),
+          cloudGet('assignments'),
+          cloudGet('activities'),
+        ]);
+        if (cp && cp.length > 0) { setPhysicians(cp); saveLS('erpk_physicians', cp); }
+        if (ca && ca.length > 0) { setAssignments(ca); saveLS('erpk_assignments', ca); }
+        if (cact && cact.length > 0) { setActivities(cact); saveLS('erpk_activities_v11', cact); }
+      } catch {}
+      setLoading(false);
+    }
+    loadFromCloud();
+  }, []);
+
+  const isFirstRender = useRef(true);
+  useEffect(() => {
+    if (loading) return;
+    if (isFirstRender.current) { isFirstRender.current = false; return; }
+    saveLS('erpk_physicians', physicians);
+    saveLS('erpk_assignments', assignments);
+    // cloud save debounced
+    setSyncStatus('saving');
+    const t = setTimeout(async () => {
+      try {
+        await Promise.all([
+          cloudSet('physicians', physicians),
+          cloudSet('assignments', assignments),
+          cloudSet('activities', activities),
+        ]);
+        setSyncStatus('saved');
+        setTimeout(() => setSyncStatus('idle'), 3000);
+      } catch {
+        setSyncStatus('error');
+      }
+    }, 2000);
+    return () => clearTimeout(t);
+  }, [physicians, assignments, activities]);
 
   const NAV=[
     {id:"schedule",icon:"📅",label:"ตารางเวร"},
@@ -1848,6 +1911,17 @@ function App(){
     {id:"physicianview",icon:"👤",label:"รายบุคคล"},
     {id:"dashboard",icon:"📊",label:"แดชบอร์ด"},
   ];
+
+  if (loading && SCRIPT_URL) {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="text-4xl mb-4">⏳</div>
+          <div className="text-slate-600 font-semibold">กำลังโหลดข้อมูลจาก Cloud...</div>
+        </div>
+      </div>
+    );
+  }
 
   return(
     <div className="min-h-screen bg-slate-100">
@@ -1879,6 +1953,22 @@ function App(){
           <div className="flex-shrink-0 text-xs text-slate-400 font-medium ml-2 hidden md:block px-2 py-1 bg-slate-50 border border-slate-200 rounded-lg">
             {MONTHS[month-1]} {year+543}
           </div>
+
+          {SCRIPT_URL && (
+            <div className="flex-shrink-0 text-xs ml-2 px-2 py-1 rounded-lg border"
+              style={syncStatus==='saving'
+                ? {background:'#fef9c3',borderColor:'#fde047',color:'#713f12'}
+                : syncStatus==='saved'
+                ? {background:'#dcfce7',borderColor:'#86efac',color:'#166534'}
+                : syncStatus==='error'
+                ? {background:'#fee2e2',borderColor:'#fca5a5',color:'#991b1b'}
+                : {background:'#f8fafc',borderColor:'#e2e8f0',color:'#94a3b8'}}>
+              {syncStatus==='saving' ? '⏳ กำลัง sync...'
+               : syncStatus==='saved' ? '✓ sync แล้ว'
+               : syncStatus==='error' ? '⚠ sync ผิดพลาด'
+               : '☁ cloud'}
+            </div>
+          )}
         </div>
       </nav>
 
