@@ -83,8 +83,9 @@ function saveLS(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch{}}
 async function cloudGet(key) {
   if (!SCRIPT_URL) return null;
   try {
-    const r = await fetch(`${SCRIPT_URL}?key=${key}`);
-    return await r.json();
+    const r = await fetch(`${SCRIPT_URL}?key=${key}`, {redirect:'follow'});
+    const text = await r.text();
+    return JSON.parse(text);
   } catch { return null; }
 }
 async function cloudSet(key, value) {
@@ -92,7 +93,9 @@ async function cloudSet(key, value) {
   try {
     await fetch(SCRIPT_URL, {
       method: 'POST',
+      headers: {'Content-Type': 'text/plain'},
       body: JSON.stringify({key, value}),
+      redirect: 'follow',
     });
   } catch {}
 }
