@@ -438,14 +438,13 @@ function generateSchedule(physicians,year,month,existingAssignments){
   }
   // ──────────────────────────────────────────────────────────────────────
   // For each doctor below their min, try to add them to available slots.
-  // Preference order for extra slots: evening (up to 3) → morning (up to 3).
-  // Night stays capped at 2.
+  // Preference order for extra slots: evening (up to max 4) → morning (up to max 3).
+  // Night stays capped at 2. Uses STAFFING[sh].max per shift.
   const EXTRA_SHIFTS_ORDER=["evening","morning"];
-  const MAX_PER_SLOT=3; // allow up to 3 doctors per evening/morning when needed
 
   let anyBelowMin=true;
   let safety=0;
-  while(anyBelowMin&&safety++<5){
+  while(anyBelowMin&&safety++<10){
     anyBelowMin=false;
     // Sort doctors by deficit (most below min first)
     const underMin=physicians
@@ -466,7 +465,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
           if(hasImmediateConflict(p.id,date,sh,newAssignments))continue;
           if(newAssignments.some(a=>a.date===date&&a.shiftType===sh&&a.physicianId===p.id))continue;
           const slotCount=newAssignments.filter(a=>a.date===date&&a.shiftType===sh).length;
-          if(slotCount>=MAX_PER_SLOT)continue;
+          if(slotCount>=STAFFING[sh].max)continue;
           // Weekend block for วนนอก period
           if(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))continue;
           candidates.push({date,sh,slotCount});
