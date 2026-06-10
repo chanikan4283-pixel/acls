@@ -38,7 +38,8 @@ const MONTHS=["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","ม�
 const LV_BG={R1:"#dbeafe",R2:"#dcfce7",R3:"#fef9c3"};
 const LV_BD={R1:"#93c5fd",R2:"#86efac",R3:"#fde047"};
 const LV_FG={R1:"#1e40af",R2:"#166534",R3:"#713f12"};
-const STAFFING={morning:{min:2,max:3},evening:{min:2,max:4},night:{min:2,max:2}};
+const STAFFING={morning:{min:2,max:3},evening:{min:2,max:3},night:{min:2,max:2}};
+const STAFFING_EXT={evening:4,night:3}; // extended max — only used in Phase E4/N3 after morning is full
 const STAFFING_FLEX={morning:{max:3},evening:{max:4}}; // evening expanded first if slot < min
 const ROTATIONS=["วนใน","วนนอก","วนนอกครึ่งเดือนแรก","วนนอกครึ่งเดือนหลัง"];
 const ROTATION_DEFAULTS={
@@ -48,41 +49,30 @@ const ROTATION_DEFAULTS={
   "วนนอกครึ่งเดือนหลัง":{R3:18,R2:18,R1:18},
 };
 const ROT_SHORT={"วนใน":"ใน","วนนอก":"นอก","วนนอกครึ่งเดือนแรก":"นอก½แรก","วนนอกครึ่งเดือนหลัง":"นอก½หลัง"};
-// 30 distinct vivid colors — index 0 reserved for เปมิกา (light purple)
+// 20 distinct colors — index 0 = #B07AA1 (purple, reserved for เปมิกา)
 const ALL_COLORS=[
-  {bg:"#7c3aed",bd:"#6d28d9",fg:"#fff"}, // 0  purple       — เปมิกา
-  {bg:"#dc2626",bd:"#b91c1c",fg:"#fff"}, // 1  red
-  {bg:"#ea580c",bd:"#c2410c",fg:"#fff"}, // 2  orange
-  {bg:"#16a34a",bd:"#15803d",fg:"#fff"}, // 3  green
-  {bg:"#2563eb",bd:"#1d4ed8",fg:"#fff"}, // 4  blue
-  {bg:"#ca8a04",bd:"#a16207",fg:"#fff"}, // 5  yellow
-  {bg:"#db2777",bd:"#be185d",fg:"#fff"}, // 6  pink
-  {bg:"#0d9488",bd:"#0f766e",fg:"#fff"}, // 7  teal
-  {bg:"#0284c7",bd:"#0369a1",fg:"#fff"}, // 8  sky blue
-  {bg:"#059669",bd:"#047857",fg:"#fff"}, // 9  emerald
-  {bg:"#d97706",bd:"#b45309",fg:"#fff"}, // 10 amber
-  {bg:"#65a30d",bd:"#4d7c0f",fg:"#fff"}, // 11 lime
-  {bg:"#e11d48",bd:"#be123c",fg:"#fff"}, // 12 rose
-  {bg:"#7e22ce",bd:"#6b21a8",fg:"#fff"}, // 13 violet
-  {bg:"#c026d3",bd:"#a21caf",fg:"#fff"}, // 14 fuchsia
-  {bg:"#0891b2",bd:"#0e7490",fg:"#fff"}, // 15 cyan
-  {bg:"#4f46e5",bd:"#4338ca",fg:"#fff"}, // 16 indigo
-  {bg:"#be185d",bd:"#9d174d",fg:"#fff"}, // 17 hot pink
-  {bg:"#15803d",bd:"#166534",fg:"#fff"}, // 18 dark green
-  {bg:"#9333ea",bd:"#7e22ce",fg:"#fff"}, // 19 purple-2
-  {bg:"#b45309",bd:"#92400e",fg:"#fff"}, // 20 brown-amber
-  {bg:"#0369a1",bd:"#075985",fg:"#fff"}, // 21 deep sky
-  {bg:"#dc2626",bd:"#991b1b",fg:"#fff"}, // 22 crimson
-  {bg:"#047857",bd:"#065f46",fg:"#fff"}, // 23 deep emerald
-  {bg:"#1d4ed8",bd:"#1e40af",fg:"#fff"}, // 24 royal blue
-  {bg:"#b91c1c",bd:"#991b1b",fg:"#fff"}, // 25 dark red
-  {bg:"#0f766e",bd:"#134e4a",fg:"#fff"}, // 26 dark teal
-  {bg:"#6d28d9",bd:"#5b21b6",fg:"#fff"}, // 27 deep purple
-  {bg:"#c2410c",bd:"#9a3412",fg:"#fff"}, // 28 burnt orange
-  {bg:"#166534",bd:"#14532d",fg:"#fff"}, // 29 forest green
+  {bg:"#B07AA1",bd:"#B07AA1",fg:"#ffffff"}, // 0  purple       — เปมิกา
+  {bg:"#4E79A7",bd:"#4E79A7",fg:"#ffffff"}, // 1  steel blue
+  {bg:"#F28E2B",bd:"#F28E2B",fg:"#1e293b"}, // 2  orange
+  {bg:"#59A14F",bd:"#59A14F",fg:"#ffffff"}, // 3  green
+  {bg:"#E15759",bd:"#E15759",fg:"#ffffff"}, // 4  red
+  {bg:"#76B7B2",bd:"#76B7B2",fg:"#1e293b"}, // 5  teal
+  {bg:"#EDC948",bd:"#EDC948",fg:"#1e293b"}, // 6  yellow
+  {bg:"#FF9DA7",bd:"#FF9DA7",fg:"#1e293b"}, // 7  pink
+  {bg:"#9C755F",bd:"#9C755F",fg:"#ffffff"}, // 8  brown
+  {bg:"#BAB0AC",bd:"#BAB0AC",fg:"#1e293b"}, // 9  gray
+  {bg:"#2F5597",bd:"#2F5597",fg:"#ffffff"}, // 10 navy
+  {bg:"#7F8C3A",bd:"#7F8C3A",fg:"#ffffff"}, // 11 olive
+  {bg:"#4ECDC4",bd:"#4ECDC4",fg:"#1e293b"}, // 12 aqua
+  {bg:"#C06C84",bd:"#C06C84",fg:"#ffffff"}, // 13 mauve
+  {bg:"#2D6A4F",bd:"#2D6A4F",fg:"#ffffff"}, // 14 dark green
+  {bg:"#D4A017",bd:"#D4A017",fg:"#1e293b"}, // 15 gold
+  {bg:"#6C5CE7",bd:"#6C5CE7",fg:"#ffffff"}, // 16 violet
+  {bg:"#E5989B",bd:"#E5989B",fg:"#1e293b"}, // 17 rose
+  {bg:"#0F766E",bd:"#0F766E",fg:"#ffffff"}, // 18 dark teal
+  {bg:"#5C6BC0",bd:"#5C6BC0",fg:"#ffffff"}, // 19 indigo
 ];
 
-// Module-level color map rebuilt whenever physicians list changes
 let _colorMap={};
 function buildColorMap(physicians){
   _colorMap={};
@@ -218,15 +208,33 @@ function isInVanNokPeriod(physician,date){
 // How many shifts in this doctor's วนนอก half so far
 function vanNokHalfShiftCount(physicianId,date,assignments){
   const day=+date.slice(8);
-  // determine which days are the วนนอก half
   const [y,m]=date.split('-').map(Number);
   const prefix=`${y}-${String(m).padStart(2,'0')}`;
   return assignments.filter(a=>{
     if(a.physicianId!==physicianId)return false;
     if(!a.date.startsWith(prefix))return false;
     const d=+a.date.slice(8);
-    return d>15===day>15; // same half
+    return d>15===day>15;
   }).length;
+}
+
+// How many shifts this doctor has in the same calendar week (Mon–Sun)
+function vanNokWeekShiftCount(physicianId,date,assignments){
+  const d=new Date(date+'T00:00:00');
+  const dow=d.getDay(); // 0=Sun
+  const monOff=dow===0?-6:1-dow;
+  const ws=new Date(d); ws.setDate(d.getDate()+monOff);
+  const we=new Date(ws); we.setDate(ws.getDate()+6);
+  const s=ws.toISOString().slice(0,10), e=we.toISOString().slice(0,10);
+  return assignments.filter(a=>a.physicianId===physicianId&&a.date>=s&&a.date<=e).length;
+}
+
+// Evening 4th slot only allowed when morning already has 3 that day
+function eveningFourthOK(date,shift,assignments){
+  if(shift!=="evening")return true;
+  const evCount=assignments.filter(a=>a.date===date&&a.shiftType==="evening").length;
+  if(evCount<3)return true; // adding 1st–3rd evening: always OK
+  return assignments.filter(a=>a.date===date&&a.shiftType==="morning").length>=3;
 }
 
 function isAvailableForSlot_raw(physician,date,shiftType){
@@ -304,9 +312,11 @@ function generateSchedule(physicians,year,month,existingAssignments){
         !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
         // Hard block: วนนอก period doctors cannot work weekends (Fri=5/Sat=6/Sun=0)
         !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
-        // Hard cap: วนนอกครึ่งเดือน → max 3 shifts in the นอก half (≈1-2/week)
+        // Hard cap: วนนอกครึ่งเดือน นอก period → max 4 shifts per entire 2-week half
         !((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&
-          isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=3)
+          isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)&&
+        // Chain limit: 8h-rest chain ≤ 4 slots
+        getRunLength(p.id,date,shift,newAssignments)<=4
       );
 
       // Sort: 0) CHIEF REQUIRED if slot has none — chiefs always sorted first until one is placed
@@ -339,7 +349,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         const bTotal=(bTypeShares.morning||0)+(bTypeShares.evening||0)+(bTypeShares.night||0);
         const aRelDef=aTotal===0?0:(aTypeShares[shift]||0)/aTotal;
         const bRelDef=bTotal===0?0:(bTypeShares[shift]||0)/bTotal;
-        if(Math.abs(aRelDef-bRelDef)>0.05)return aRelDef-bRelDef;
+        if(Math.abs(aRelDef-bRelDef)>0.01)return aRelDef-bRelDef;
 
         // Consecutive run soft penalty
         const aRun=getRunLength(a.id,date,shift,newAssignments);
@@ -347,8 +357,8 @@ function generateSchedule(physicians,year,month,existingAssignments){
         if(aRun!==bRun){
           if(aRun>4&&bRun<=4)return 1;
           if(bRun>4&&aRun<=4)return -1;
-          if(aRun>3&&bRun<=3)return 1;
-          if(bRun>3&&aRun<=3)return -1;
+          if(aRun>4&&bRun<=4)return 1;
+          if(bRun>4&&aRun<=4)return -1;
         }
 
         // Penalize วนนอก-period doctors who already have many shifts in their วนนอก half
@@ -363,6 +373,15 @@ function generateSchedule(physicians,year,month,existingAssignments){
           if(bHalf>=cap(b.rotation)&&aHalf<cap(a.rotation))return -1;
         }
 
+        // Prefer ครึ่งเดือน doctors in their ใน-half (front-load shifts there)
+        const aIsHalf=(a.rotation==="วนนอกครึ่งเดือนแรก"||a.rotation==="วนนอกครึ่งเดือนหลัง");
+        const bIsHalf=(b.rotation==="วนนอกครึ่งเดือนแรก"||b.rotation==="วนนอกครึ่งเดือนหลัง");
+        if((aIsHalf||bIsHalf)&&!isInVanNokPeriod({rotation:a.rotation},date)&&!isInVanNokPeriod({rotation:b.rotation},date)){
+          // Both in ใน-period: prefer the one with more room before target
+          const aRoom=(a.targetShifts||0)-(shiftCounts[a.id]||0);
+          const bRoom=(b.targetShifts||0)-(shiftCounts[b.id]||0);
+          if(Math.abs(aRoom-bRoom)>1)return bRoom-aRoom;
+        }
         const aDiff=(shiftCounts[a.id]||0)-(a.targetShifts||0);
         const bDiff=(shiftCounts[b.id]||0)-(b.targetShifts||0);
         if(aDiff!==bDiff)return aDiff-bDiff;
@@ -402,8 +421,11 @@ function generateSchedule(physicians,year,month,existingAssignments){
           (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
           isAvailableForSlot(p,date,shift)&&
           !hasImmediateConflict(p.id,date,shift,newAssignments)&&
+          !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
           // Hard block: วนนอก period doctors cannot work weekends (Fri=5/Sat=6/Sun=0)
-          !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))
+          !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
+          // Chain limit in Pass 3
+          getRunLength(p.id,date,shift,newAssignments)<=4
         );
         pool3.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
         for(const p of pool3){
@@ -416,16 +438,38 @@ function generateSchedule(physicians,year,month,existingAssignments){
         }
       }
 
-      // Pass 4: overflow — ignore maxShifts (still block 0-hr gaps)
+      // Pass 4: overflow — ignore maxShifts but still enforce chain limit and same-day conflicts
       if(assigned<need){
         const pool4=physicians.filter(p=>
           !fixedPids.has(p.id)&&
           !(p.daysOff||[]).includes(date)&&
           isAvailableForSlot(p,date,shift)&&
-          !hasImmediateConflict(p.id,date,shift,newAssignments)
+          !hasImmediateConflict(p.id,date,shift,newAssignments)&&
+          !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
+          getRunLength(p.id,date,shift,newAssignments)<=4
         );
         pool4.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
         for(const p of pool4){
+          if(assigned>=need)break;
+          newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
+          shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+          if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][shift]=(shiftTypeCounts[p.id][shift]||0)+1;
+          fixedPids.add(p.id);
+          assigned++;
+        }
+      }
+
+      // Pass 5: absolute last resort — ignore chain limit (only block 0-hr gaps, ensure slot not empty)
+      if(assigned<need){
+        const pool5=physicians.filter(p=>
+          !fixedPids.has(p.id)&&
+          !(p.daysOff||[]).includes(date)&&
+          isAvailableForSlot(p,date,shift)&&
+          !hasImmediateConflict(p.id,date,shift,newAssignments)&&
+          !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
+        );
+        pool5.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+        for(const p of pool5){
           if(assigned>=need)break;
           newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
           shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
@@ -472,12 +516,41 @@ function generateSchedule(physicians,year,month,existingAssignments){
       if(shiftTypeCounts[chief.id])shiftTypeCounts[chief.id][shift]=(shiftTypeCounts[chief.id][shift]||0)+1;
     }
   }
+  // ────────────────────────────────────────────────────────────────────────
+  // Phase M3: fill ALL morning slots to 3 across the entire month FIRST
+  // (before underMin, toward-target, evening-4th, or night-3rd)
+  function fillShiftToMax(sh,slotMax){
+    for(let d=1;d<=days;d++){
+      const date=dateStr(year,month,d);
+      const cur=()=>newAssignments.filter(a=>a.date===date&&a.shiftType===sh).length;
+      if(cur()>=slotMax)continue;
+      const pool=physicians.filter(p=>
+        !newAssignments.some(a=>a.date===date&&a.shiftType===sh&&a.physicianId===p.id)&&
+        !(p.daysOff||[]).includes(date)&&
+        (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+        isAvailableForSlot(p,date,sh)&&
+        !hasImmediateConflict(p.id,date,sh,newAssignments)&&
+        !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,sh))&&
+        !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
+        !((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)&&
+        getRunLength(p.id,date,sh,newAssignments)<=4
+      );
+      pool.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+      for(const p of pool){
+        if(cur()>=slotMax)break;
+        newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:sh,isLocked:false,isManual:false});
+        shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+        if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][sh]=(shiftTypeCounts[p.id][sh]||0)+1;
+      }
+    }
+  }
+  fillShiftToMax("morning",3); // Phase M3: morning full across whole month first
+
   // ──────────────────────────────────────────────────────────────────────
   // For each doctor below their min, try to add them to available slots.
-  // Preference order for extra slots: evening (up to 3) → morning (up to 3).
-  // Night stays capped at 2.
-  const EXTRA_SHIFTS_ORDER=["evening","morning","night"];
-  const MAX_PER_SLOT=4; // allow up to 4 doctors per evening/morning when needed
+  // Preference order for extra slots: morning → evening (up to 3) → night (up to 2).
+  const EXTRA_SHIFTS_ORDER=["morning","evening","night"];
+  const MAX_PER_SLOT=3; // capped at 3 for evening, 2 for night until Phase E4/N3 runs
 
   let anyBelowMin=true;
   let safety=0;
@@ -502,16 +575,36 @@ function generateSchedule(physicians,year,month,existingAssignments){
           if(hasImmediateConflict(p.id,date,sh,newAssignments))continue;
           if(newAssignments.some(a=>a.date===date&&a.shiftType===sh&&a.physicianId===p.id))continue;
           const slotCount=newAssignments.filter(a=>a.date===date&&a.shiftType===sh).length;
-          if(slotCount>=MAX_PER_SLOT)continue;
+          if(slotCount>=(STAFFING[sh]?.max??2))continue;
+          if((shiftCounts[p.id]||0)>=(p.maxShifts||99))continue;
           // Weekend block for วนนอก period
           if(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))continue;
+          // Relax chain limit for underMin: allow up to 5 (instead of 4) when doctor is below min
+          const deficit=(p.minShifts||0)-(shiftCounts[p.id]||0);
+          const chainMax=deficit>=3?6:deficit>=1?5:4;
+          if(getRunLength(p.id,date,sh,newAssignments)>chainMax)continue;
           candidates.push({date,sh,slotCount});
         }
       }
       if(candidates.length===0)continue;
-      // Pick slot with fewest doctors (most need), break ties by date
-      candidates.sort((a,b)=>a.slotCount-b.slotCount||a.date.localeCompare(b.date)||
-        EXTRA_SHIFTS_ORDER.indexOf(a.sh)-EXTRA_SHIFTS_ORDER.indexOf(b.sh));
+      // Sort: pick shift type doctor has done least (balance เช้า/บ่าย/ดึก), prefer ใน-half for ครึ่งเดือน doctors
+      const pTCu=shiftTypeCounts[p.id]||{morning:0,evening:0,night:0};
+      const pTotu=(pTCu.morning||0)+(pTCu.evening||0)+(pTCu.night||0);
+      const isHalfU=(p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง");
+      candidates.sort((a,b)=>{
+        // Strongly prefer shift type furthest below equal 1/3 share
+        const aShare=pTotu===0?0:(pTCu[a.sh]||0)/pTotu;
+        const bShare=pTotu===0?0:(pTCu[b.sh]||0)/pTotu;
+        if(Math.abs(aShare-bShare)>0.05)return aShare-bShare;
+        const aHas=pTCu[a.sh]||0,bHas=pTCu[b.sh]||0;
+        if(aHas!==bHas)return aHas-bHas;
+        // ครึ่งเดือน: strongly prefer ใน-half dates (front-load)
+        if(isHalfU){
+          const aInNok=isInVanNokPeriod(p,a.date),bInNok=isInVanNokPeriod(p,b.date);
+          if(aInNok!==bInNok)return aInNok?1:-1;
+        }
+        return a.slotCount-b.slotCount||a.date.localeCompare(b.date);
+      });
       const best=candidates[0];
       newAssignments.push({id:uid(),physicianId:p.id,date:best.date,shiftType:best.sh,isLocked:false,isManual:false});
       shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
@@ -542,18 +635,28 @@ function generateSchedule(physicians,year,month,existingAssignments){
           if(newAssignments.some(a=>a.date===date&&a.shiftType===sh&&a.physicianId===p.id))continue;
           const slotCount=newAssignments.filter(a=>a.date===date&&a.shiftType===sh).length;
           if(slotCount>=STAFFING[sh].max)continue;
+          if((shiftCounts[p.id]||0)>=(p.maxShifts||99))continue;
           if(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))continue;
           if((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&
              isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)continue;
-          if(getRunLength(p.id,date,sh,newAssignments)>3)continue;
+          if(getRunLength(p.id,date,sh,newAssignments)>4)continue;
           cands.push({date,sh,slotCount});
         }
       }
       if(cands.length===0)continue;
       const pTC=shiftTypeCounts[p.id]||{morning:0,evening:0,night:0};
+      const pTot=(pTC.morning||0)+(pTC.evening||0)+(pTC.night||0);
       cands.sort((a,b)=>{
+        const aShare=pTot===0?0:(pTC[a.sh]||0)/pTot;
+        const bShare=pTot===0?0:(pTC[b.sh]||0)/pTot;
+        if(Math.abs(aShare-bShare)>0.05)return aShare-bShare;
         const aHas=pTC[a.sh]||0,bHas=pTC[b.sh]||0;
         if(aHas!==bHas)return aHas-bHas;
+        const isHalf=(p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง");
+        if(isHalf){
+          const aInNok=isInVanNokPeriod(p,a.date),bInNok=isInVanNokPeriod(p,b.date);
+          if(aInNok!==bInNok)return aInNok?1:-1;
+        }
         return a.slotCount-b.slotCount||a.date.localeCompare(b.date);
       });
       const best=cands[0];
@@ -564,7 +667,59 @@ function generateSchedule(physicians,year,month,existingAssignments){
     }
     if(!anyAdded)break;
   }
-  // ────────────────────────────────────────────────────────────────────────
+  // Phase E4: evening → 4 per slot (only on days where morning is already 3)
+  for(let d=1;d<=days;d++){
+    const date=dateStr(year,month,d);
+    const morningFull=newAssignments.filter(a=>a.date===date&&a.shiftType==="morning").length>=3;
+    if(!morningFull)continue;
+    const evCur=newAssignments.filter(a=>a.date===date&&a.shiftType==="evening").length;
+    if(evCur>=STAFFING_EXT.evening)continue;
+    const pool=physicians.filter(p=>
+      !newAssignments.some(a=>a.date===date&&a.shiftType==="evening"&&a.physicianId===p.id)&&
+      !(p.daysOff||[]).includes(date)&&
+      (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+      isAvailableForSlot(p,date,"evening")&&
+      !hasImmediateConflict(p.id,date,"evening",newAssignments)&&
+      !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"evening"))&&
+      !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
+      !((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)&&
+      getRunLength(p.id,date,"evening",newAssignments)<=4
+    );
+    pool.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+    for(const p of pool){
+      if(newAssignments.filter(a=>a.date===date&&a.shiftType==="evening").length>=STAFFING_EXT.evening)break;
+      newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:"evening",isLocked:false,isManual:false});
+      shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+      if(shiftTypeCounts[p.id])shiftTypeCounts[p.id]["evening"]=(shiftTypeCounts[p.id]["evening"]||0)+1;
+    }
+  }
+
+  // Phase N3: night → 3 per slot (only on days where morning is already 3)
+  for(let d=1;d<=days;d++){
+    const date=dateStr(year,month,d);
+    const morningFull=newAssignments.filter(a=>a.date===date&&a.shiftType==="morning").length>=3;
+    if(!morningFull)continue;
+    const niCur=newAssignments.filter(a=>a.date===date&&a.shiftType==="night").length;
+    if(niCur>=STAFFING_EXT.night)continue;
+    const pool=physicians.filter(p=>
+      !newAssignments.some(a=>a.date===date&&a.shiftType==="night"&&a.physicianId===p.id)&&
+      !(p.daysOff||[]).includes(date)&&
+      (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+      isAvailableForSlot(p,date,"night")&&
+      !hasImmediateConflict(p.id,date,"night",newAssignments)&&
+      !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"night"))&&
+      !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
+      getRunLength(p.id,date,"night",newAssignments)<=4
+    );
+    pool.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+    for(const p of pool){
+      if(newAssignments.filter(a=>a.date===date&&a.shiftType==="night").length>=STAFFING_EXT.night)break;
+      newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:"night",isLocked:false,isManual:false});
+      shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+      if(shiftTypeCounts[p.id])shiftTypeCounts[p.id]["night"]=(shiftTypeCounts[p.id]["night"]||0)+1;
+    }
+  }
+
   // Post-processing: cluster rest days into pairs
   clusterRestDays(physicians,newAssignments,year,month);
 
@@ -1774,7 +1929,9 @@ function PhysicianView({physicians,year,month,assignments}){
 function Dashboard({physicians,year,month,assignments,activities}){
   const days=daysInMonth(year,month);
   const monthPrefix=`${year}-${String(month).padStart(2,'0')}`;
+  const yearPrefix=`${year}-`;
   const monthA=useMemo(()=>assignments.filter(a=>a.date.startsWith(monthPrefix)),[assignments,monthPrefix]);
+  const yearA=useMemo(()=>assignments.filter(a=>a.date.startsWith(yearPrefix)),[assignments,yearPrefix]);
   const total=monthA.length;
   const avg=physicians.length?(Math.round(total/physicians.length*10)/10):0;
 
@@ -1820,6 +1977,10 @@ function Dashboard({physicians,year,month,assignments,activities}){
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {physicians.map(p=>{
           const pa=monthA.filter(a=>a.physicianId===p.id);
+          const ya=yearA.filter(a=>a.physicianId===p.id);
+          const morn=pa.filter(a=>a.shiftType==="morning").length;
+          const even=pa.filter(a=>a.shiftType==="evening").length;
+          const nigh=pa.filter(a=>a.shiftType==="night").length;
           const daysOff=(p.daysOff||[]).filter(d=>d.startsWith(monthPrefix)).length;
           const free=Math.max(0,days-pa.length-daysOff);
           const col=physColor(p.id);
@@ -1834,26 +1995,36 @@ function Dashboard({physicians,year,month,assignments,activities}){
                 <Badge color="purple">{ROT_SHORT[p.rotation||"วนนอก"]}</Badge>
               </div>
 
-              {/* Stats row */}
+              {/* Shift type breakdown — เช้า/บ่าย/ดึก */}
+              <div className="grid grid-cols-3 gap-1.5 mb-2">
+                {[["เช้า","#2563eb","#dbeafe",morn],["บ่าย","#16a34a","#dcfce7",even],["ดึก","#7c3aed","#ede9fe",nigh]].map(([label,fg,bg,cnt])=>(
+                  <div key={label} className="rounded-lg p-2 text-center" style={{background:bg,border:`1px solid ${fg}30`}}>
+                    <div className="text-lg font-black" style={{color:fg}}>{cnt}</div>
+                    <div className="text-xs font-bold" style={{color:fg}}>{label}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Month total + yearly cumulative */}
               <div className="grid grid-cols-3 gap-1.5 mb-3">
-                <div className="bg-blue-50 rounded-lg p-2 text-center">
-                  <div className="text-base font-black text-blue-700">{pa.length}</div>
-                  <div className="text-xs text-blue-500">เวร</div>
+                <div className="bg-slate-50 rounded-lg p-2 text-center col-span-1">
+                  <div className="text-base font-black text-slate-700">{pa.length}</div>
+                  <div className="text-xs text-slate-500">เดือนนี้</div>
                 </div>
                 <div className="bg-red-50 rounded-lg p-2 text-center">
                   <div className="text-base font-black text-red-700">{daysOff}</div>
                   <div className="text-xs text-red-500">หยุด</div>
                 </div>
-                <div className="bg-slate-50 rounded-lg p-2 text-center">
-                  <div className="text-base font-black text-slate-600">{free}</div>
-                  <div className="text-xs text-slate-400">ว่าง</div>
+                <div className="rounded-lg p-2 text-center" style={{background:"#fef9c3"}}>
+                  <div className="text-base font-black" style={{color:"#713f12"}}>{ya.length}</div>
+                  <div className="text-xs font-bold" style={{color:"#92400e"}}>ปี {year+543}</div>
                 </div>
               </div>
 
               {/* Progress bar */}
               <div className="mb-3">
                 <div className="flex justify-between text-xs mb-1">
-                  <span className="text-slate-500">ความคืบหน้า</span>
+                  <span className="text-slate-500">เดือนนี้ vs target</span>
                   <span className="font-semibold" style={{color:col.bg}}>{pa.length}/{p.targetShifts}</span>
                 </div>
                 <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
