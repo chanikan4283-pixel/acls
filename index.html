@@ -270,7 +270,9 @@ function generateSchedule(physicians,year,month,existingAssignments){
         !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
         // Hard cap: วนนอกครึ่งเดือน → max 4 shifts in the นอก half
         !((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&
-          isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)
+          isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)&&
+        // Hard block: 8เว้น8 chain ห้ามเกิน 3 เวรติดต่อกัน
+        getRunLength(p.id,date,shift,newAssignments)<=3
       );
 
       // Sort: 0) CHIEF REQUIRED if slot has none — chiefs always sorted first until one is placed
@@ -308,15 +310,10 @@ function generateSchedule(physicians,year,month,existingAssignments){
         const aAbs=aTypeShares[shift]||0, bAbs=bTypeShares[shift]||0;
         if(aAbs!==bAbs)return aAbs-bAbs;
 
-        // Consecutive run soft penalty
+        // Prefer shorter 8เว้น8 chains (hard max=3 enforced at pool filter; prefer 1<2<3 here)
         const aRun=getRunLength(a.id,date,shift,newAssignments);
         const bRun=getRunLength(b.id,date,shift,newAssignments);
-        if(aRun!==bRun){
-          if(aRun>4&&bRun<=4)return 1;
-          if(bRun>4&&aRun<=4)return -1;
-          if(aRun>3&&bRun<=3)return 1;
-          if(bRun>3&&aRun<=3)return -1;
-        }
+        if(aRun!==bRun)return aRun-bRun;
 
         // Penalize วนนอก-period doctors who already have many shifts in their วนนอก half
         const aVanNok=isInVanNokPeriod(a,date);
@@ -361,7 +358,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         }
       }
 
-      // Pass 3: relax soft run-length penalty (still block 0-hr gaps + maxShifts + availability)
+      // Pass 3: relax shift-off / same-day conflict but keep run≤3 + 0-hr gap + maxShifts
       if(assigned<need){
         const pool3=physicians.filter(p=>
           !fixedPids.has(p.id)&&
@@ -370,7 +367,9 @@ function generateSchedule(physicians,year,month,existingAssignments){
           isAvailableForSlot(p,date,shift)&&
           !hasImmediateConflict(p.id,date,shift,newAssignments)&&
           // Hard block: วนนอก period doctors cannot work weekends (Fri=5/Sat=6/Sun=0)
-          !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))
+          !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
+          // Still enforce 8เว้น8 chain ≤3 in pass 3
+          getRunLength(p.id,date,shift,newAssignments)<=3
         );
         pool3.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
         for(const p of pool3){
@@ -474,18 +473,23 @@ function generateSchedule(physicians,year,month,existingAssignments){
           // Hard cap: วนนอกครึ่งเดือน → max 4 shifts in นอก half
           if((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&
              isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)continue;
-          candidates.push({date,sh,slotCount});
+          // Flag whether this candidate respects 8เว้น8 chain ≤3
+          const runOk=getRunLength(p.id,date,sh,newAssignments)<=3;
+          candidates.push({date,sh,slotCount,runOk});
         }
       }
       if(candidates.length===0)continue;
+      // Prefer candidates that don't exceed chain-3; fall back to all if none safe
+      const safeCands=candidates.filter(c=>c.runOk);
+      const useCands=safeCands.length>0?safeCands:candidates;
       // Sort: prefer shift type doctor has fewer of (balance เช้า/บ่าย), then fewest in slot, then date
       const pTC=shiftTypeCounts[p.id]||{morning:0,evening:0,night:0};
-      candidates.sort((a,b)=>{
+      useCands.sort((a,b)=>{
         const aHas=pTC[a.sh]||0, bHas=pTC[b.sh]||0;
         if(aHas!==bHas)return aHas-bHas;
         return a.slotCount-b.slotCount||a.date.localeCompare(b.date);
       });
-      const best=candidates[0];
+      const best=useCands[0];
       newAssignments.push({id:uid(),physicianId:p.id,date:best.date,shiftType:best.sh,isLocked:false,isManual:false});
       shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
       if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][best.sh]=(shiftTypeCounts[p.id][best.sh]||0)+1;
