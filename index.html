@@ -106,6 +106,63 @@ function isChief(p){return p.level==="R2"||p.level==="R3";}
 function loadLS(k,d){try{const v=localStorage.getItem(k);return v!==null?JSON.parse(v):d;}catch{return d;}}
 function saveLS(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch{}}
 
+// Collapse duplicate doctor records that share a NAME *or* an ID into one.
+// Earlier list position = higher priority (local edits go first). The merge is
+// LOSSLESS for day-off data: daysOff / shiftsOff / preferredShifts are UNIONED
+// across every copy, so a day-off the user set on ANY duplicate is never thrown
+// away (the old "keep-first" version silently dropped the other copy's daysOff,
+// which is why a doctor could still be scheduled on a day they asked off).
+// The survivor keeps a canonical "pN" id when one exists so that assignments
+// already pointing at that id stay valid.
+function dedupePhysByName(list){
+  const recs=[];
+  const byName=new Map(); // trimmed name -> index in recs
+  const byId=new Map();   // id -> index in recs
+  const isCanonical=id=>/^p\d+$/.test(id||"");
+  const mergeInto=(t,p)=>{
+    t.daysOff=Array.from(new Set([...(t.daysOff||[]),...(p.daysOff||[])]));
+    t.shiftsOff=Array.from(new Set([...(t.shiftsOff||[]),...(p.shiftsOff||[])]));
+    t.preferredShifts=Array.from(new Set([...(t.preferredShifts||[]),...(p.preferredShifts||[])]));
+    // adopt a canonical id if the kept record doesn't already have one
+    if(!isCanonical(t.id)&&isCanonical(p.id))t.id=p.id;
+  };
+  for(const p of (list||[])){
+    const name=(p.name||"").trim();
+    if(!name)continue;
+    let idx=byName.has(name)?byName.get(name):(byId.has(p.id)?byId.get(p.id):-1);
+    if(idx<0){
+      const rec={...p,daysOff:[...(p.daysOff||[])],shiftsOff:[...(p.shiftsOff||[])],preferredShifts:[...(p.preferredShifts||[])]};
+      idx=recs.length; recs.push(rec);
+    }else{
+      mergeInto(recs[idx],p);
+    }
+    // (re)point both maps at this record — id may have just become canonical
+    byName.set(name,idx); byId.set(recs[idx].id,idx);
+  }
+  return recs;
+}
+// Re-point assignments that reference a removed duplicate doctor to the surviving
+// record with the same name; drop assignments whose doctor no longer exists at all.
+function remapAssignments(assignments,allKnownPhys,keptPhys){
+  const nameById={}; (allKnownPhys||[]).forEach(p=>{nameById[p.id]=(p.name||"").trim();});
+  const keptByName={}; keptPhys.forEach(p=>{keptByName[(p.name||"").trim()]=p;});
+  const keptIds=new Set(keptPhys.map(p=>p.id));
+  const out=[]; const dedup=new Set();
+  for(const a of (assignments||[])){
+    let pid=a.physicianId;
+    if(!keptIds.has(pid)){
+      const surv=keptByName[nameById[pid]||""];
+      if(!surv)continue; // doctor deleted entirely — drop orphan shift
+      pid=surv.id;
+    }
+    const key=pid+"|"+a.date+"|"+a.shiftType;
+    if(dedup.has(key))continue; // same doctor can't hold the same slot twice
+    dedup.add(key);
+    out.push(pid===a.physicianId?a:{...a,physicianId:pid});
+  }
+  return out;
+}
+
 async function cloudGet(key) {
   if (!SCRIPT_URL) return null;
   try {
@@ -279,7 +336,15 @@ function validateCanGenerate(physicians,year,month){
 function generateSchedule(physicians,year,month,existingAssignments){
   const errors=[];
   const warnings=[];
-  const fixed=existingAssignments.filter(a=>a.isLocked||a.isManual);
+  // fixed = locked/manual assignments, BUT exclude any where the doctor now has a daysOff
+  const physMap=Object.fromEntries(physicians.map(p=>[p.id,p]));
+  const fixed=existingAssignments.filter(a=>{
+    if(!a.isLocked&&!a.isManual)return false;
+    const p=physMap[a.physicianId];
+    if(!p)return false;
+    if((p.daysOff||[]).includes(a.date))return false; // doctor now has day off — drop even if locked
+    return true;
+  });
   const newAssignments=[...fixed];
   const shiftCounts={};
   // Track per-shift-type counts for balanced morning/evening/night distribution
@@ -518,33 +583,29 @@ function generateSchedule(physicians,year,month,existingAssignments){
   }
   // ────────────────────────────────────────────────────────────────────────
   // Phase M3: fill ALL morning slots to 3 across the entire month FIRST
-  // (before underMin, toward-target, evening-4th, or night-3rd)
-  function fillShiftToMax(sh,slotMax){
-    for(let d=1;d<=days;d++){
-      const date=dateStr(year,month,d);
-      const cur=()=>newAssignments.filter(a=>a.date===date&&a.shiftType===sh).length;
-      if(cur()>=slotMax)continue;
-      const pool=physicians.filter(p=>
-        !newAssignments.some(a=>a.date===date&&a.shiftType===sh&&a.physicianId===p.id)&&
-        !(p.daysOff||[]).includes(date)&&
-        (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
-        isAvailableForSlot(p,date,sh)&&
-        !hasImmediateConflict(p.id,date,sh,newAssignments)&&
-        !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,sh))&&
-        !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
-        !((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)&&
-        getRunLength(p.id,date,sh,newAssignments)<=4
-      );
-      pool.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
-      for(const p of pool){
-        if(cur()>=slotMax)break;
-        newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:sh,isLocked:false,isManual:false});
-        shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
-        if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][sh]=(shiftTypeCounts[p.id][sh]||0)+1;
-      }
+  for(let _d=1;_d<=days;_d++){
+    const _date=dateStr(year,month,_d);
+    if((physMap[_date]||newAssignments.filter(a=>a.date===_date&&a.shiftType==="morning").length)>=3)continue; // quick skip
+    const _mCur=newAssignments.filter(a=>a.date===_date&&a.shiftType==="morning").length;
+    if(_mCur>=3)continue;
+    const _pool=physicians.filter(p=>
+      !newAssignments.some(a=>a.date===_date&&a.shiftType==="morning"&&a.physicianId===p.id)&&
+      !(p.daysOff||[]).includes(_date)&&
+      (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+      isAvailableForSlot(p,_date,"morning")&&
+      !hasImmediateConflict(p.id,_date,"morning",newAssignments)&&
+      !newAssignments.filter(a=>a.date===_date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"morning"))&&
+      !(isInVanNokPeriod(p,_date)&&[0,5,6].includes(new Date(_date+'T00:00:00').getDay()))&&
+      getRunLength(p.id,_date,"morning",newAssignments)<=4
+    );
+    _pool.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+    for(const p of _pool){
+      if(newAssignments.filter(a=>a.date===_date&&a.shiftType==="morning").length>=3)break;
+      newAssignments.push({id:uid(),physicianId:p.id,date:_date,shiftType:"morning",isLocked:false,isManual:false});
+      shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+      if(shiftTypeCounts[p.id])shiftTypeCounts[p.id]["morning"]=(shiftTypeCounts[p.id]["morning"]||0)+1;
     }
   }
-  fillShiftToMax("morning",3); // Phase M3: morning full across whole month first
 
   // ──────────────────────────────────────────────────────────────────────
   // For each doctor below their min, try to add them to available slots.
@@ -723,7 +784,13 @@ function generateSchedule(physicians,year,month,existingAssignments){
   // Post-processing: cluster rest days into pairs
   clusterRestDays(physicians,newAssignments,year,month);
 
-  return{ok:errors.length===0,assignments:newAssignments,errors,warnings};
+  // HARD FINAL GUARD: strip every assignment where doctor has daysOff — no exceptions
+  const finalAssignments=newAssignments.filter(a=>{
+    const p=physMap[a.physicianId];
+    return !p||(!(p.daysOff||[]).includes(a.date));
+  });
+
+  return{ok:errors.length===0,assignments:finalAssignments,errors,warnings};
 }
 
 /* ── Post-process: cluster isolated rest days ───────────────── */
@@ -942,7 +1009,7 @@ function DaysOffPicker({year,month,selected,onChange,shiftsOff,onShiftsOffChange
 /* ═══════════════════════════════════════════════
    PHYSICIANS PAGE
 ═══════════════════════════════════════════════ */
-function PhysiciansPage({physicians,setPhysicians,year,month}){
+function PhysiciansPage({physicians,setPhysicians,year,month,assignments,setAssignments}){
   const [modalOpen,setModalOpen]=useState(false);
   const [editId,setEditId]=useState(null);
   const [fName,setFName]=useState("");
@@ -982,13 +1049,25 @@ function PhysiciansPage({physicians,setPhysicians,year,month}){
   }
   function handleSave(){
     if(!fName.trim())return;
+    const name=fName.trim();
+    // Adding a name that already exists must UPDATE that doctor, never create a
+    // duplicate (two records of the same doctor = day-off lives on one while the
+    // other keeps getting scheduled).
+    const dup=!editId&&physicians.find(p=>(p.name||"").trim()===name);
+    const targetId=editId||(dup?dup.id:uid());
     const obj={
-      id:editId||uid(),name:fName.trim(),level:fLevel,rotation:fRotation,
+      id:targetId,name,level:fLevel,rotation:fRotation,
       minShifts:+fMin,targetShifts:+fTarget,maxShifts:+fMax,
       daysOff:fDaysOff,shiftsOff:fShiftsOff,preferredShifts:fPrefs
     };
-    if(editId)setPhysicians(prev=>prev.map(p=>p.id===editId?obj:p));
+    if(editId||dup)setPhysicians(prev=>prev.map(p=>p.id===targetId?obj:p));
     else setPhysicians(prev=>[...prev,obj]);
+    // Immediately remove any existing assignments on daysOff days — hard priority
+    if(setAssignments){
+      setAssignments(prev=>prev.filter(a=>
+        a.physicianId!==targetId||!(fDaysOff||[]).includes(a.date)
+      ));
+    }
     setModalOpen(false);
   }
 
@@ -1531,7 +1610,10 @@ function MonthlyCalendar({year,month,physicians,assignments,setAssignments,activ
 
                 {/* Shifts */}
                 {SHIFTS.map(sh=>{
-                  const slotA=assignments.filter(a=>a.date===ds&&a.shiftType===sh);
+                  const slotA=assignments.filter(a=>a.date===ds&&a.shiftType===sh).filter(a=>{
+                    const phys=physicians.find(p=>p.id===a.physicianId);
+                    return !phys||!(phys.daysOff||[]).includes(ds);
+                  });
                   const cnt=slotA.length;
                   const minR=STAFFING[sh].min;
                   const under=cnt>0&&cnt<minR;
@@ -1641,7 +1723,36 @@ function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAss
     setTimeout(()=>{
       try{
         const res=generateSchedule(physicians,year,month,assignments);
-        setAssignments(res.assignments);
+        // Extra safety: strip any assignment where the doctor has a daysOff (belt-and-suspenders)
+        const physById=Object.fromEntries(physicians.map(p=>[p.id,p]));
+        const safeAssignments=res.assignments.filter(a=>{
+          const ph=physById[a.physicianId];
+          return !ph||!(ph.daysOff||[]).includes(a.date);
+        });
+        setAssignments(safeAssignments);
+        // Check daysOff-aware staffing warnings
+        const daysInM=daysInMonth(year,month);
+        const daysOffWarnings=[];
+        for(let d=1;d<=daysInM;d++){
+          const ds=dateStr(year,month,d);
+          for(const sh of SHIFTS){
+            const available=physicians.filter(p=>
+              !(p.daysOff||[]).includes(ds)&&
+              isAvailableForSlot(p,ds,sh)&&
+              (p.maxShifts||0)>0
+            );
+            const availCount=available.length;
+            const minNeeded=STAFFING[sh].min;
+            if(availCount<minNeeded){
+              daysOffWarnings.push(`⚠ วันที่ ${d} เวร${SH_SHORT[sh]}: มีคนขอหยุดมากเกินไป แพทย์ไม่พอ (มี ${availCount}/${minNeeded} คน)`);
+            } else if(!available.some(p=>isChief(p))){
+              daysOffWarnings.push(`⚠ วันที่ ${d} เวร${SH_SHORT[sh]}: ไม่มี Chief (R2/R3) ที่ว่างในวันนี้`);
+            }
+          }
+        }
+        if(daysOffWarnings.length>0){
+          res.errors=[...(res.errors||[]),...daysOffWarnings];
+        }
         setErrors(res.errors);
         const warnN=(res.warnings||[]).length;
         if(res.ok)setGenMsg(warnN?`✓ สร้างตารางเวรสำเร็จ (มี ${warnN} เวรที่ไม่มี Chief)`:"✓ สร้างตารางเวรสำเร็จ");
@@ -1678,7 +1789,8 @@ function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAss
       const shiftDoctors=SHIFTS.map(sh=>
         assignments.filter(a=>a.date===ds&&a.shiftType===sh).map(a=>{
           const p=physicians.find(x=>x.id===a.physicianId);
-          return p?{name:p.name,level:p.level,color:physColor(p.id)}:null;
+          if(!p||(p.daysOff||[]).includes(ds))return null;
+          return{name:p.name,level:p.level,color:physColor(p.id)};
         }).filter(Boolean)
       );
       const maxRows=Math.max(1,...shiftDoctors.map(s=>s.length));
@@ -1889,7 +2001,7 @@ function PhysicianView({physicians,year,month,assignments}){
               {row.map((d,ci)=>{
                 if(!d)return<div key={ci} className="border-r border-b border-slate-200 bg-slate-50/60" style={{minHeight:90}}/>;
                 const ds=dateStr(year,month,d);
-                const dayA=myA.filter(a=>a.date===ds);
+                const dayA=myA.filter(a=>a.date===ds&&!(p.daysOff||[]).includes(ds));
                 const isOff=(p.daysOff||[]).includes(ds);
                 const isWE=isWeekend(ds);
                 const hasWork=dayA.length>0;
@@ -1930,8 +2042,9 @@ function Dashboard({physicians,year,month,assignments,activities}){
   const days=daysInMonth(year,month);
   const monthPrefix=`${year}-${String(month).padStart(2,'0')}`;
   const yearPrefix=`${year}-`;
-  const monthA=useMemo(()=>assignments.filter(a=>a.date.startsWith(monthPrefix)),[assignments,monthPrefix]);
-  const yearA=useMemo(()=>assignments.filter(a=>a.date.startsWith(yearPrefix)),[assignments,yearPrefix]);
+  const physMapD=useMemo(()=>Object.fromEntries(physicians.map(p=>[p.id,p])),[physicians]);
+  const monthA=useMemo(()=>assignments.filter(a=>{const p=physMapD[a.physicianId];return a.date.startsWith(monthPrefix)&&(!p||!(p.daysOff||[]).includes(a.date));}),[assignments,monthPrefix,physMapD]);
+  const yearA=useMemo(()=>assignments.filter(a=>{const p=physMapD[a.physicianId];return a.date.startsWith(yearPrefix)&&(!p||!(p.daysOff||[]).includes(a.date));}),[assignments,yearPrefix,physMapD]);
   const total=monthA.length;
   const avg=physicians.length?(Math.round(total/physicians.length*10)/10):0;
 
@@ -2113,7 +2226,7 @@ function App(){
   const [physicians,setPhysicians]=useState(()=>{
     const saved=loadLS("erpk_physicians",null);
     if(!saved||saved.length===0)return DEFAULT_PHYSICIANS;
-    return saved;
+    return dedupePhysByName(saved);
   });
   const [assignments,setAssignments]=useState(()=>_isNewVersion?[]:loadLS("erpk_assignments",[]));
   // Build unique color map whenever physicians list changes (guarantees no duplicate colors)
@@ -2122,8 +2235,20 @@ function App(){
   const [loading,setLoading]=useState(true);
   const [syncStatus,setSyncStatus]=useState("idle"); // "idle"|"saving"|"saved"|"error"
 
+  // ── SINGLE SOURCE OF TRUTH for daysOff filtering ──────────────────────────
+  // All display components receive safeAssignments (never raw assignments).
+  // This is the ultimate guard: no matter where a violation enters state
+  // (cloud sync, localStorage, generator edge-case), it is invisible to the UI.
+  const _physById=useMemo(()=>Object.fromEntries(physicians.map(p=>[p.id,p])),[physicians]);
+  const safeAssignments=useMemo(()=>
+    // Drop shifts of deleted doctors (orphans, incl. removed duplicates) AND any shift
+    // on that doctor's requested day off — nothing else ever reaches the UI or storage.
+    assignments.filter(a=>{const p=_physById[a.physicianId];return !!p&&!(p.daysOff||[]).includes(a.date);}),
+  [assignments,_physById]);
+
   useEffect(()=>saveLS("erpk_physicians",physicians),[physicians]);
-  useEffect(()=>saveLS("erpk_assignments",assignments),[assignments]);
+  // Save safeAssignments (not raw) so localStorage/cloud never accumulates daysOff violations
+  useEffect(()=>saveLS("erpk_assignments",safeAssignments),[safeAssignments]);
   React.useEffect(()=>{ localStorage.setItem("erpk_activities_v11", JSON.stringify(activities)); }, [activities]);
 
   useEffect(() => {
@@ -2135,15 +2260,25 @@ function App(){
           cloudGet('assignments'),
           cloudGet('activities'),
         ]);
-        if (cp && cp.length > 0) {
-          // Merge: keep cloud data but add any new doctors from DEFAULT_PHYSICIANS not yet in cloud
-          const existingIds = new Set(cp.map(p=>p.id));
-          const merged = [...cp, ...DEFAULT_PHYSICIANS.filter(p=>!existingIds.has(p.id))];
-          setPhysicians(merged); saveLS('erpk_physicians', merged);
-          // Push merged list back to cloud so it's saved
-          cloudSet('physicians', merged);
+        // Merge physicians by NAME, local edits first. A doctor deleted-and-re-added
+        // locally gets a new id; matching by id alone resurrects the stale cloud copy
+        // as a duplicate (e.g. two อภิญญา — one with the day-off, one without, and the
+        // old one keeps getting scheduled). Name-based dedupe keeps exactly one record
+        // per doctor, preferring the local one that carries the freshest daysOff.
+        const localList = physicians; // from localStorage at mount — freshest edits
+        const allKnown = [...localList, ...(cp||[]), ...DEFAULT_PHYSICIANS];
+        const physList = dedupePhysByName(allKnown);
+        const physByIdC = Object.fromEntries(physList.map(p=>[p.id,p]));
+        setPhysicians(physList); saveLS('erpk_physicians', physList);
+        if (cp && cp.length > 0) cloudSet('physicians', physList); // overwrite stale cloud list
+        if (ca && ca.length > 0) {
+          // Re-point shifts from removed duplicate ids to the surviving doctor,
+          // then strip anything that conflicts with that doctor's daysOff.
+          const remapped = remapAssignments(ca, allKnown, physList);
+          const cleanCa = remapped.filter(a=>{ const p=physByIdC[a.physicianId]; return !p||!(p.daysOff||[]).includes(a.date); });
+          setAssignments(cleanCa); saveLS('erpk_assignments', cleanCa);
+          cloudSet('assignments', cleanCa); // push cleaned schedule back so stale rows die for good
         }
-        if (ca && ca.length > 0) { setAssignments(ca); saveLS('erpk_assignments', ca); }
         if (cact && cact.length > 0) { setActivities(cact); saveLS('erpk_activities_v11', cact); }
       } catch {}
       setLoading(false);
@@ -2155,15 +2290,18 @@ function App(){
   useEffect(() => {
     if (loading) return;
     if (isFirstRender.current) { isFirstRender.current = false; return; }
-    saveLS('erpk_physicians', physicians);
-    saveLS('erpk_assignments', assignments);
+    // Always persist a de-duplicated, day-off-merged physician list so duplicate
+    // records can never propagate back into localStorage or the cloud.
+    const cleanPhys = dedupePhysByName(physicians);
+    saveLS('erpk_physicians', cleanPhys);
+    saveLS('erpk_assignments', safeAssignments);
     // cloud save debounced
     setSyncStatus('saving');
     const t = setTimeout(async () => {
       try {
         await Promise.all([
-          cloudSet('physicians', physicians),
-          cloudSet('assignments', assignments),
+          cloudSet('physicians', cleanPhys),
+          cloudSet('assignments', safeAssignments),
           cloudSet('activities', activities),
         ]);
         setSyncStatus('saved');
@@ -2239,6 +2377,18 @@ function App(){
                : '☁ cloud'}
             </div>
           )}
+          {/* Reset: clear stale local + cloud assignment cache that may pre-date daysOff fixes */}
+          <button type="button"
+            onClick={async()=>{
+              if(!window.confirm('ล้างตารางเวรทั้งหมด (เวรที่จัดไว้) ออกจากเครื่องและ cloud?\nรายชื่อแพทย์และวันหยุดจะยังอยู่ครบ'))return;
+              setAssignments([]);
+              saveLS('erpk_assignments',[]);
+              try{ if(SCRIPT_URL) await cloudSet('assignments',[]); }catch{}
+              window.location.reload();
+            }}
+            className="flex-shrink-0 text-xs ml-2 px-2 py-1 rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 font-semibold transition-colors">
+            🔄 ล้างเวรเก่า
+          </button>
         </div>
       </nav>
 
@@ -2247,20 +2397,20 @@ function App(){
         {page==="schedule"&&(
           <SchedulePage physicians={physicians} year={year} month={month}
             setYear={setYear} setMonth={setMonth}
-            assignments={assignments} setAssignments={setAssignments}
+            assignments={safeAssignments} setAssignments={setAssignments}
             activities={activities} setActivities={setActivities}/>
         )}
         {page==="physicians"&&(
           <PhysiciansPage physicians={physicians} setPhysicians={setPhysicians}
-            year={year} month={month}/>
+            year={year} month={month} assignments={assignments} setAssignments={setAssignments}/>
         )}
         {page==="physicianview"&&(
           <PhysicianView physicians={physicians} year={year} month={month}
-            assignments={assignments}/>
+            assignments={safeAssignments}/>
         )}
         {page==="dashboard"&&(
           <Dashboard physicians={physicians} year={year} month={month}
-            assignments={assignments} activities={activities}/>
+            assignments={safeAssignments} activities={activities}/>
         )}
       </main>
     </div>
