@@ -311,7 +311,23 @@ function isAvailableForSlot_raw(physician,date,shiftType){
   return true; // วนใน: all shifts
 }
 
-function isAvailableForSlot(physician,date,shiftType){return isAvailableForSlot_raw(physician,date,shiftType);}
+function isAvailableForSlot(physician,date,shiftType){
+  // Doctor explicitly blocked this exact shift on this date — treat like a day-off
+  // (never overridden, not even by last-resort fill). Centralised here so every
+  // phase respects it; previously Pass 3/4/5 and the morning/evening/night fill
+  // phases omitted the shiftsOff check and could schedule a blocked shift.
+  if((physician.shiftsOff||[]).includes(date+"_"+shiftType))return false;
+  // วนนอก-period doctors never work weekends (Fri=5/Sat=6/Sun=0). Enforced here,
+  // centrally, so EVERY scheduling phase that calls isAvailableForSlot — including
+  // last-resort fill and rest-day clustering — respects it. (Previously this was an
+  // inline check sprinkled across passes, and Pass 5 / clusterRestDays forgot it,
+  // letting วนนอก doctors leak onto weekends even when inner doctors were free.)
+  if(isInVanNokPeriod(physician,date)){
+    const dow=new Date(date+'T00:00:00').getDay();
+    if(dow===0||dow===5||dow===6)return false;
+  }
+  return isAvailableForSlot_raw(physician,date,shiftType);
+}
 
 function validateCanGenerate(physicians,year,month){
   const errors=[];
@@ -569,11 +585,11 @@ function generateSchedule(physicians,year,month,existingAssignments){
         isAvailableForSlot(p,date,shift)&&
         !hasImmediateConflict(p.id,date,shift,newAssignments)
       );
-      if(chiefPool.length===0){
-        // Soft: no chief available for this slot — allowed (amber warning only, not a hard error)
-        warnings.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: ไม่มี Chief (R2/R3) ในเวรนี้`);
-        continue;
-      }
+      // No warning here — later fill/expansion/rest-clustering phases can still
+      // change this slot. The FINAL chief-guarantee pass (after clusterRestDays)
+      // owns the warning so we never double-report or warn about a slot that ends
+      // up with a chief anyway.
+      if(chiefPool.length===0)continue;
       chiefPool.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
       const chief=chiefPool[0];
       newAssignments.push({id:uid(),physicianId:chief.id,date,shiftType:shift,isLocked:false,isManual:false});
@@ -783,6 +799,67 @@ function generateSchedule(physicians,year,month,existingAssignments){
 
   // Post-processing: cluster rest days into pairs
   clusterRestDays(physicians,newAssignments,year,month);
+
+  // ── FINAL chief guarantee ───────────────────────────────────────────────
+  // Runs LAST (after every fill/expansion/rest-clustering step) so nothing can
+  // leave a slot chiefless behind our back. For each filled slot with no Chief:
+  //   • if there is room (< slot max) → add a free chief
+  //   • if the slot is full          → swap out a spare R1 (one with slack above
+  //                                     their min) for a free chief
+  //   • if no chief is free at all    → soft warning (surfaced to the user)
+  for(let d=1;d<=days;d++){
+    for(const shift of SHIFTS){
+      const date=dateStr(year,month,d);
+      const slotA=newAssignments.filter(a=>a.date===date&&a.shiftType===shift);
+      if(slotA.length===0)continue;
+      if(slotA.some(a=>{const p=physMap[a.physicianId];return p&&isChief(p);}))continue;
+      const existingPids=new Set(slotA.map(a=>a.physicianId));
+      const chiefPool=physicians.filter(p=>
+        isChief(p)&&!existingPids.has(p.id)&&
+        !(p.daysOff||[]).includes(date)&&
+        !(p.shiftsOff||[]).includes(date+"_"+shift)&&
+        isAvailableForSlot(p,date,shift)&&
+        !hasImmediateConflict(p.id,date,shift,newAssignments)&&
+        !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
+      ).map(p=>({p,run:getRunLength(p.id,date,shift,newAssignments)}))
+       .sort((a,b)=>a.run-b.run||(shiftCounts[a.p.id]||0)-(shiftCounts[b.p.id]||0));
+      // Keep the 8เว้น8 chain within the relaxed bound (≤6): prefer a chief that
+      // keeps it ≤4, else accept up to ≤6. If covering this slot would force a
+      // chief past 6 consecutive (≈3+ days straight), leave it chiefless + warn
+      // rather than overwork them.
+      const pick=chiefPool.find(c=>c.run<=4)||chiefPool.find(c=>c.run<=6);
+      if(!pick){
+        warnings.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: ไม่มี Chief (R2/R3) ในเวรนี้`);
+        continue;
+      }
+      const chief=pick.p;
+      const cap=STAFFING_EXT[shift]||STAFFING[shift].max; // morning 3, evening 4, night 3
+      const addChief=()=>{
+        newAssignments.push({id:uid(),physicianId:chief.id,date,shiftType:shift,isLocked:false,isManual:false});
+        shiftCounts[chief.id]=(shiftCounts[chief.id]||0)+1;
+        if(shiftTypeCounts[chief.id])shiftTypeCounts[chief.id][shift]=(shiftTypeCounts[chief.id][shift]||0)+1;
+      };
+      if(slotA.length<cap){ addChief(); continue; }
+      // Slot full — swap out the most expendable non-chief (most shifts above min,
+      // still strictly above min so we never push anyone below their minimum).
+      const removable=slotA
+        .filter(a=>!a.isLocked&&!a.isManual&&!isChief(physMap[a.physicianId]))
+        .map(a=>({a,slack:(shiftCounts[a.physicianId]||0)-((physMap[a.physicianId]||{}).minShifts||0)}))
+        .filter(x=>x.slack>0)
+        .sort((x,y)=>y.slack-x.slack);
+      if(removable.length===0){
+        warnings.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: ไม่มี Chief (R2/R3) ในเวรนี้`);
+        continue;
+      }
+      const victim=removable[0].a;
+      const vIdx=newAssignments.indexOf(victim);
+      if(vIdx<0){ warnings.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: ไม่มี Chief (R2/R3) ในเวรนี้`); continue; }
+      newAssignments.splice(vIdx,1);
+      shiftCounts[victim.physicianId]=(shiftCounts[victim.physicianId]||0)-1;
+      if(shiftTypeCounts[victim.physicianId])shiftTypeCounts[victim.physicianId][shift]=Math.max(0,(shiftTypeCounts[victim.physicianId][shift]||0)-1);
+      addChief();
+    }
+  }
 
   // HARD FINAL GUARD: strip every assignment where doctor has daysOff — no exceptions
   const finalAssignments=newAssignments.filter(a=>{
