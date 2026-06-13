@@ -380,9 +380,25 @@ function generateSchedule(physicians,year,month,existingAssignments){
   });
 
   const days=daysInMonth(year,month);
-  for(let d=1;d<=days;d++){
-    for(const shift of SHIFTS){
-      const date=dateStr(year,month,d);
+  // ── Fill slots TIGHTEST-FIRST ───────────────────────────────────────────
+  // Where many doctors requested off, the slot has the fewest candidates, so we
+  // fill it BEFORE easier slots consume the scarce doctors. Order: fewest
+  // available first, then fewest available chiefs, then by date/shift.
+  const slotOrder=[];
+  for(let d=1;d<=days;d++)for(const shift of SHIFTS){
+    const date=dateStr(year,month,d);
+    const avail=physicians.filter(p=>
+      !(p.daysOff||[]).includes(date)&&
+      !(p.shiftsOff||[]).includes(date+"_"+shift)&&
+      isAvailableForSlot(p,date,shift)&&
+      (p.maxShifts||0)>0
+    );
+    slotOrder.push({d,date,shift,availCount:avail.length,chiefAvail:avail.filter(isChief).length});
+  }
+  slotOrder.sort((a,b)=>a.availCount-b.availCount||a.chiefAvail-b.chiefAvail||a.date.localeCompare(b.date)||SHIFTS.indexOf(a.shift)-SHIFTS.indexOf(b.shift));
+  for(const _slot of slotOrder){
+    {
+      const {d,date,shift}=_slot;
       const slotFixed=fixed.filter(a=>a.date===date&&a.shiftType===shift);
       const fixedPids=new Set(slotFixed.map(a=>a.physicianId));
       let chiefInSlot=slotFixed.some(a=>{const p=physicians.find(x=>x.id===a.physicianId);return p&&isChief(p);});
@@ -548,19 +564,25 @@ function generateSchedule(physicians,year,month,existingAssignments){
         }
       }
 
-      // Pass 5: last resort to fill a slot to MIN. Still HARD-capped at 4 consecutive
-      // (8เว้น8) shifts — we never overwork anyone past 4 in a row even to fill a slot.
-      // If the slot can't reach min within that cap it stays short (surfaced as a warning).
+      // Pass 5: last resort to reach MIN. Coverage (≥2 per slot) is the top
+      // priority, so here we ALLOW the 8เว้น8 chain to exceed 4 if that is the only
+      // way to fill the slot — but still prefer doctors whose chain stays ≤4, and
+      // never break the truly-hard rules (day-off, shift-off, rotation, weekend,
+      // 0-hr gap). Any resulting chain>4 is reported afterwards.
       if(assigned<need){
         const pool5=physicians.filter(p=>
           !fixedPids.has(p.id)&&
           !(p.daysOff||[]).includes(date)&&
           isAvailableForSlot(p,date,shift)&&
           !hasImmediateConflict(p.id,date,shift,newAssignments)&&
-          !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
-          getRunLength(p.id,date,shift,newAssignments)<=4
+          !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
         );
-        pool5.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+        pool5.sort((a,b)=>{
+          const ar=getRunLength(a.id,date,shift,newAssignments)>4?1:0;
+          const br=getRunLength(b.id,date,shift,newAssignments)>4?1:0;
+          if(ar!==br)return ar-br; // keep chains ≤4 first
+          return (shiftCounts[a.id]||0)-(shiftCounts[b.id]||0);
+        });
         for(const p of pool5){
           if(assigned>=need)break;
           newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
@@ -570,11 +592,8 @@ function generateSchedule(physicians,year,month,existingAssignments){
           assigned++;
         }
       }
-
-      const slotTotal=newAssignments.filter(a=>a.date===date&&a.shiftType===shift).length;
-      if(slotTotal<STAFFING[shift].min){
-        errors.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: แพทย์ที่เหลือไม่พอ — ลองเพิ่มแพทย์ R1 หรือเพิ่ม Max เวร (ได้ ${slotTotal}/${STAFFING[shift].min} คน)`);
-      }
+      // (Short-slot / no-chief / chain>4 reporting happens once, at the end,
+      //  reflecting the final schedule — see the unified report pass below.)
     }
   }
 
@@ -820,9 +839,11 @@ function generateSchedule(physicians,year,month,existingAssignments){
   // Runs LAST (after every fill/expansion/rest-clustering step) so nothing can
   // leave a slot chiefless behind our back. For each filled slot with no Chief:
   //   • if there is room (< slot max) → add a free chief
-  //   • if the slot is full          → swap out a spare R1 (one with slack above
-  //                                     their min) for a free chief
-  //   • if no chief is free at all    → soft warning (surfaced to the user)
+  //   • if the slot is full          → swap out a spare R1 (slack above min) for a chief
+  // Coverage is the priority: a chief is added even if it pushes their 8เว้น8 chain
+  // past 4 (we still PREFER a chief whose chain stays ≤4; any chain>4 is reported
+  // by the unified report below). Only when no chief is free at all is the slot
+  // left chiefless — the report then explains exactly why.
   for(let d=1;d<=days;d++){
     for(const shift of SHIFTS){
       const date=dateStr(year,month,d);
@@ -839,14 +860,8 @@ function generateSchedule(physicians,year,month,existingAssignments){
         !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
       ).map(p=>({p,run:getRunLength(p.id,date,shift,newAssignments)}))
        .sort((a,b)=>a.run-b.run||(shiftCounts[a.p.id]||0)-(shiftCounts[b.p.id]||0));
-      // Hard-cap the 8เว้น8 chain at 4: only add a chief whose chain stays ≤4.
-      // If covering this slot would force a chief to a 5th consecutive shift,
-      // leave it chiefless and warn rather than overwork them.
-      const pick=chiefPool.find(c=>c.run<=4);
-      if(!pick){
-        warnings.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: ไม่มี Chief (R2/R3) ในเวรนี้`);
-        continue;
-      }
+      const pick=chiefPool.find(c=>c.run<=4)||chiefPool[0];
+      if(!pick)continue; // genuinely no chief free — unified report explains why
       const chief=pick.p;
       const cap=STAFFING_EXT[shift]||STAFFING[shift].max; // morning 3, evening 4, night 3
       const addChief=()=>{
@@ -862,18 +877,58 @@ function generateSchedule(physicians,year,month,existingAssignments){
         .map(a=>({a,slack:(shiftCounts[a.physicianId]||0)-((physMap[a.physicianId]||{}).minShifts||0)}))
         .filter(x=>x.slack>0)
         .sort((x,y)=>y.slack-x.slack);
-      if(removable.length===0){
-        warnings.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: ไม่มี Chief (R2/R3) ในเวรนี้`);
-        continue;
-      }
+      if(removable.length===0)continue; // can't free a seat without dropping someone below min
       const victim=removable[0].a;
       const vIdx=newAssignments.indexOf(victim);
-      if(vIdx<0){ warnings.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: ไม่มี Chief (R2/R3) ในเวรนี้`); continue; }
+      if(vIdx<0)continue;
       newAssignments.splice(vIdx,1);
       shiftCounts[victim.physicianId]=(shiftCounts[victim.physicianId]||0)-1;
       if(shiftTypeCounts[victim.physicianId])shiftTypeCounts[victim.physicianId][shift]=Math.max(0,(shiftTypeCounts[victim.physicianId][shift]||0)-1);
       addChief();
     }
+  }
+
+  // ── Unified report: explain every coverage gap + flag long chains ─────────
+  // Computed on the FINAL schedule so messages reflect what actually happened.
+  for(let d=1;d<=days;d++){
+    for(const shift of SHIFTS){
+      const date=dateStr(year,month,d);
+      const lbl=`เวร${SH_SHORT[shift]}วันที่ ${d}`;
+      const slot=newAssignments.filter(a=>a.date===date&&a.shiftType===shift);
+      const isOff=p=>(p.daysOff||[]).includes(date)||(p.shiftsOff||[]).includes(date+"_"+shift);
+      // (1) Understaffed (below min) — the hardest failure. Say who asked off + how to fix.
+      if(slot.length<STAFFING[shift].min){
+        const off=physicians.filter(isOff).map(p=>p.name);
+        errors.push(`${lbl}: ได้ ${slot.length}/${STAFFING[shift].min} คน`+
+          (off.length?` — คนขอหยุดวันนี้: ${off.join(', ')}`:``)+
+          ` — วิธีแก้: ลดวันหยุดของแพทย์ในวันนี้ หรือเพิ่ม Max เวร หรือเพิ่มแพทย์`);
+        continue; // a short slot's chief message would be redundant
+      }
+      // (2) Chiefless (filled, but no R2/R3). Explain why no chief was placeable.
+      if(slot.length>0&&!slot.some(a=>{const p=physMap[a.physicianId];return p&&isChief(p);})){
+        const chiefs=physicians.filter(isChief);
+        const off=chiefs.filter(isOff).map(p=>p.name);
+        const rest=chiefs.filter(p=>!isOff(p));
+        const maxed=rest.filter(p=>(shiftCounts[p.id]||0)>=(p.maxShifts||99)).map(p=>p.name);
+        const other=rest.filter(p=>(shiftCounts[p.id]||0)<(p.maxShifts||99)).map(p=>p.name);
+        const parts=[];
+        if(off.length)parts.push(`ชีฟขอหยุด: ${off.join(', ')}`);
+        if(maxed.length)parts.push(`ชีฟเวรเต็มโควตา: ${maxed.join(', ')}`);
+        if(other.length)parts.push(`ชีฟติดเงื่อนไข (วนนอก/เสาร์อาทิตย์/เวรชนกัน): ${other.join(', ')}`);
+        warnings.push(`${lbl}: ไม่มีชีฟ (R2/R3) — ${parts.join(' | ')||'ชีฟไม่ว่าง'} — วิธีแก้: ให้ชีฟคนใดคนหนึ่งเปิดวันนี้ หรือเพิ่ม Max เวรของชีฟ`);
+      }
+    }
+  }
+  // (3) Long 8เว้น8 chains (>4) — always reported so the user knows who was overworked.
+  const _mPfx=`${year}-${String(month).padStart(2,'0')}`;
+  for(const p of physicians){
+    const mine=newAssignments.filter(a=>a.physicianId===p.id&&a.date.startsWith(_mPfx))
+      .map(a=>({a,r:shiftEpochRange(a.date,a.shiftType)})).sort((x,y)=>x.r.start-y.r.start);
+    if(mine.length<5)continue;
+    let cl=[mine[0]];
+    const flush=()=>{ if(cl.length>4){ const ds=[...new Set(cl.map(c=>+c.a.date.slice(8)))].sort((x,y)=>x-y); warnings.push(`⛓ ${p.name}: เวรติดกัน ${cl.length} เวร (วันที่ ${ds.join(', ')}) — เกิน 4 เพื่อให้มีคน/ชีฟครบ`); } };
+    for(let i=1;i<mine.length;i++){ if(mine[i].r.start-mine[i-1].r.end<=8*60)cl.push(mine[i]); else{flush();cl=[mine[i]];} }
+    flush();
   }
 
   // HARD FINAL GUARD: strip every assignment where doctor has daysOff — no exceptions
@@ -1823,34 +1878,14 @@ function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAss
           return !ph||!(ph.daysOff||[]).includes(a.date);
         });
         setAssignments(safeAssignments);
-        // Check daysOff-aware staffing warnings
-        const daysInM=daysInMonth(year,month);
-        const daysOffWarnings=[];
-        for(let d=1;d<=daysInM;d++){
-          const ds=dateStr(year,month,d);
-          for(const sh of SHIFTS){
-            const available=physicians.filter(p=>
-              !(p.daysOff||[]).includes(ds)&&
-              isAvailableForSlot(p,ds,sh)&&
-              (p.maxShifts||0)>0
-            );
-            const availCount=available.length;
-            const minNeeded=STAFFING[sh].min;
-            if(availCount<minNeeded){
-              daysOffWarnings.push(`⚠ วันที่ ${d} เวร${SH_SHORT[sh]}: มีคนขอหยุดมากเกินไป แพทย์ไม่พอ (มี ${availCount}/${minNeeded} คน)`);
-            } else if(!available.some(p=>isChief(p))){
-              daysOffWarnings.push(`⚠ วันที่ ${d} เวร${SH_SHORT[sh]}: ไม่มี Chief (R2/R3) ที่ว่างในวันนี้`);
-            }
-          }
-        }
-        if(daysOffWarnings.length>0){
-          res.errors=[...(res.errors||[]),...daysOffWarnings];
-        }
-        setErrors(res.errors);
+        // generateSchedule already produces the authoritative, post-schedule
+        // diagnostics (understaffed slots → errors; chiefless slots + chain>4 →
+        // warnings), each explaining who is off and how to fix it.
+        setErrors(res.errors||[]);
         setWarnings(res.warnings||[]);
         const warnN=(res.warnings||[]).length;
         if(res.ok)setGenMsg(warnN?`✓ สร้างตารางเวรสำเร็จ (มี ${warnN} ข้อสังเกตด้านล่าง)`:"✓ สร้างตารางเวรสำเร็จ");
-        else setGenMsg(`⚠ สร้างตารางแล้ว แต่มี ${res.errors.length} ช่วงที่แพทย์ไม่เพียงพอ`);
+        else setGenMsg(`⚠ สร้างตารางแล้ว แต่มี ${(res.errors||[]).length} ช่วงที่แพทย์ไม่เพียงพอ — ดูรายละเอียดด้านล่าง`);
       }catch(e){setErrors([`เกิดข้อผิดพลาด: ${e.message}`]);}
       finally{setGenerating(false);}
     },80);
@@ -1997,16 +2032,16 @@ function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAss
       {errors.length>0&&(
         <div className="mb-3 bg-red-50 border border-red-200 rounded-xl p-4">
           <div className="font-bold text-red-700 text-sm mb-2">⛔ ข้อผิดพลาด ({errors.length} รายการ)</div>
-          <ul className="list-disc list-inside text-xs text-red-600 space-y-0.5 max-h-36 overflow-y-auto">
-            {errors.map((e,i)=><li key={i}>{e}</li>)}
+          <ul className="list-disc list-inside text-xs text-red-600 space-y-1 max-h-48 overflow-y-auto break-words">
+            {errors.map((e,i)=><li key={i} className="leading-snug">{e}</li>)}
           </ul>
         </div>
       )}
       {warnings.length>0&&(
         <div className="mb-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
           <div className="font-bold text-amber-700 text-sm mb-2">⚠ ข้อสังเกต ({warnings.length} รายการ)</div>
-          <ul className="list-disc list-inside text-xs text-amber-700 space-y-0.5 max-h-40 overflow-y-auto">
-            {warnings.map((w,i)=><li key={i}>{w}</li>)}
+          <ul className="list-disc list-inside text-xs text-amber-700 space-y-1 max-h-56 overflow-y-auto break-words">
+            {warnings.map((w,i)=><li key={i} className="leading-snug">{w}</li>)}
           </ul>
         </div>
       )}
