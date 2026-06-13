@@ -9,7 +9,15 @@
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <style>
-body{font-family:'Segoe UI',Tahoma,sans-serif;background:#f1f5f9;}
+/* Cross-platform font stack. -apple-system/BlinkMacSystemFont give SF Pro on
+   iOS/macOS (renders Thai cleanly via the system Thai face); Sukhumvit Set &
+   Thonburi are explicit iOS Thai fallbacks; Segoe UI/Tahoma cover Windows.
+   Previously the stack started with 'Segoe UI' (absent on iPhone), so iOS fell
+   back to a face that rendered Thai vowels/tone marks oddly. */
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Sukhumvit Set','Thonburi',Tahoma,'Helvetica Neue',sans-serif;background:#f1f5f9;-webkit-text-size-adjust:100%;}
+/* Thai stacks vowels above and tone marks below the base glyph; ultra-tight
+   line-heights clip them. Give very small Thai labels a little vertical room. */
+.th-tight{line-height:1.35!important;}
 .chip{display:inline-flex;align-items:center;padding:1px 7px;border-radius:999px;font-size:10px;font-weight:700;border:1.5px solid;cursor:pointer;white-space:nowrap;margin:1px;line-height:1.6;transition:opacity 0.1s;}
 .chip:hover{filter:brightness(0.92);}
 .popup{position:fixed;z-index:9000;background:#fff;border:1px solid #e2e8f0;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.18);min-width:185px;}
@@ -540,10 +548,9 @@ function generateSchedule(physicians,year,month,existingAssignments){
         }
       }
 
-      // Pass 5: last resort to fill a slot to MIN. The normal cap is 4 consecutive
-      // (8เว้น8) shifts; here we relax ONLY because the slot would otherwise be
-      // understaffed — but still bounded at 6 (≈3 days straight) so we never build
-      // an extreme chain, and we prefer doctors whose chain stays ≤4.
+      // Pass 5: last resort to fill a slot to MIN. Still HARD-capped at 4 consecutive
+      // (8เว้น8) shifts — we never overwork anyone past 4 in a row even to fill a slot.
+      // If the slot can't reach min within that cap it stays short (surfaced as a warning).
       if(assigned<need){
         const pool5=physicians.filter(p=>
           !fixedPids.has(p.id)&&
@@ -551,15 +558,9 @@ function generateSchedule(physicians,year,month,existingAssignments){
           isAvailableForSlot(p,date,shift)&&
           !hasImmediateConflict(p.id,date,shift,newAssignments)&&
           !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
-          getRunLength(p.id,date,shift,newAssignments)<=6
+          getRunLength(p.id,date,shift,newAssignments)<=4
         );
-        // Prefer keeping chains ≤4, then fewest shifts.
-        pool5.sort((a,b)=>{
-          const ar=getRunLength(a.id,date,shift,newAssignments)>4?1:0;
-          const br=getRunLength(b.id,date,shift,newAssignments)>4?1:0;
-          if(ar!==br)return ar-br;
-          return (shiftCounts[a.id]||0)-(shiftCounts[b.id]||0);
-        });
+        pool5.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
         for(const p of pool5){
           if(assigned>=need)break;
           newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
@@ -666,14 +667,12 @@ function generateSchedule(physicians,year,month,existingAssignments){
           if((shiftCounts[p.id]||0)>=(p.maxShifts||99))continue;
           // Weekend block for วนนอก period
           if(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))continue;
-          // Normal cap is 4 consecutive (8เว้น8). Relax ONLY when below min, and
-          // only as far as needed: up to 6 for a big deficit, 5 for a small one.
-          // The sort below still prefers any ≤4 option first, so 5–6 is used only
-          // when no ≤4 slot exists for this doctor.
-          const deficit=(p.minShifts||0)-(shiftCounts[p.id]||0);
-          const chainMax=deficit>=3?6:deficit>=1?5:4;
+          // Hard cap: never build a chain longer than 4 consecutive (8เว้น8) shifts,
+          // even to reach a doctor's min. If a doctor can't reach min without a 5th
+          // consecutive shift, they stay just under min (surfaced as a warning) —
+          // the user prefers that over anyone working 5 in a row.
           const run=getRunLength(p.id,date,sh,newAssignments);
-          if(run>chainMax)continue;
+          if(run>4)continue;
           candidates.push({date,sh,slotCount,run});
         }
       }
@@ -840,11 +839,10 @@ function generateSchedule(physicians,year,month,existingAssignments){
         !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
       ).map(p=>({p,run:getRunLength(p.id,date,shift,newAssignments)}))
        .sort((a,b)=>a.run-b.run||(shiftCounts[a.p.id]||0)-(shiftCounts[b.p.id]||0));
-      // Keep the 8เว้น8 chain within the relaxed bound (≤6): prefer a chief that
-      // keeps it ≤4, else accept up to ≤6. If covering this slot would force a
-      // chief past 6 consecutive (≈3+ days straight), leave it chiefless + warn
-      // rather than overwork them.
-      const pick=chiefPool.find(c=>c.run<=4)||chiefPool.find(c=>c.run<=6);
+      // Hard-cap the 8เว้น8 chain at 4: only add a chief whose chain stays ≤4.
+      // If covering this slot would force a chief to a 5th consecutive shift,
+      // leave it chiefless and warn rather than overwork them.
+      const pick=chiefPool.find(c=>c.run<=4);
       if(!pick){
         warnings.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: ไม่มี Chief (R2/R3) ในเวรนี้`);
         continue;
@@ -1078,7 +1076,7 @@ function DaysOffPicker({year,month,selected,onChange,shiftsOff,onShiftsOffChange
                     ${!we&&!off?"text-slate-700":""}`}>
                   {d}
                 </button>
-                {off&&<span className="text-xs text-red-500 font-bold leading-none">หยุด</span>}
+                {off&&<span className="text-xs text-red-500 font-bold th-tight">หยุด</span>}
                 <div className="flex gap-0.5 mt-0.5">
                   {[["ช","morning","#3b82f6"],["บ","evening","#f97316"],["ด","night","#7c3aed"]].map(([label,sh,color])=>{
                     const active=safeShiftsOff.includes(shiftKeys[sh]);
@@ -1800,6 +1798,7 @@ function MonthlyCalendar({year,month,physicians,assignments,setAssignments,activ
 ═══════════════════════════════════════════════ */
 function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAssignments,activities,setActivities}){
   const [errors,setErrors]=useState([]);
+  const [warnings,setWarnings]=useState([]);
   const [genMsg,setGenMsg]=useState("");
   const [generating,setGenerating]=useState(false);
 
@@ -1812,8 +1811,8 @@ function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAss
 
   function handleGenerate(){
     const errs=validateCanGenerate(physicians,year,month);
-    if(errs.length){setErrors(errs);setGenMsg("");return;}
-    setErrors([]);setGenerating(true);
+    if(errs.length){setErrors(errs);setWarnings([]);setGenMsg("");return;}
+    setErrors([]);setWarnings([]);setGenerating(true);
     setTimeout(()=>{
       try{
         const res=generateSchedule(physicians,year,month,assignments);
@@ -1848,8 +1847,9 @@ function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAss
           res.errors=[...(res.errors||[]),...daysOffWarnings];
         }
         setErrors(res.errors);
+        setWarnings(res.warnings||[]);
         const warnN=(res.warnings||[]).length;
-        if(res.ok)setGenMsg(warnN?`✓ สร้างตารางเวรสำเร็จ (มี ${warnN} เวรที่ไม่มี Chief)`:"✓ สร้างตารางเวรสำเร็จ");
+        if(res.ok)setGenMsg(warnN?`✓ สร้างตารางเวรสำเร็จ (มี ${warnN} ข้อสังเกตด้านล่าง)`:"✓ สร้างตารางเวรสำเร็จ");
         else setGenMsg(`⚠ สร้างตารางแล้ว แต่มี ${res.errors.length} ช่วงที่แพทย์ไม่เพียงพอ`);
       }catch(e){setErrors([`เกิดข้อผิดพลาด: ${e.message}`]);}
       finally{setGenerating(false);}
@@ -1999,6 +1999,14 @@ function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAss
           <div className="font-bold text-red-700 text-sm mb-2">⛔ ข้อผิดพลาด ({errors.length} รายการ)</div>
           <ul className="list-disc list-inside text-xs text-red-600 space-y-0.5 max-h-36 overflow-y-auto">
             {errors.map((e,i)=><li key={i}>{e}</li>)}
+          </ul>
+        </div>
+      )}
+      {warnings.length>0&&(
+        <div className="mb-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <div className="font-bold text-amber-700 text-sm mb-2">⚠ ข้อสังเกต ({warnings.length} รายการ)</div>
+          <ul className="list-disc list-inside text-xs text-amber-700 space-y-0.5 max-h-40 overflow-y-auto">
+            {warnings.map((w,i)=><li key={i}>{w}</li>)}
           </ul>
         </div>
       )}
