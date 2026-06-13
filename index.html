@@ -540,16 +540,26 @@ function generateSchedule(physicians,year,month,existingAssignments){
         }
       }
 
-      // Pass 5: absolute last resort — ignore chain limit (only block 0-hr gaps, ensure slot not empty)
+      // Pass 5: last resort to fill a slot to MIN. The normal cap is 4 consecutive
+      // (8เว้น8) shifts; here we relax ONLY because the slot would otherwise be
+      // understaffed — but still bounded at 6 (≈3 days straight) so we never build
+      // an extreme chain, and we prefer doctors whose chain stays ≤4.
       if(assigned<need){
         const pool5=physicians.filter(p=>
           !fixedPids.has(p.id)&&
           !(p.daysOff||[]).includes(date)&&
           isAvailableForSlot(p,date,shift)&&
           !hasImmediateConflict(p.id,date,shift,newAssignments)&&
-          !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
+          !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
+          getRunLength(p.id,date,shift,newAssignments)<=6
         );
-        pool5.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+        // Prefer keeping chains ≤4, then fewest shifts.
+        pool5.sort((a,b)=>{
+          const ar=getRunLength(a.id,date,shift,newAssignments)>4?1:0;
+          const br=getRunLength(b.id,date,shift,newAssignments)>4?1:0;
+          if(ar!==br)return ar-br;
+          return (shiftCounts[a.id]||0)-(shiftCounts[b.id]||0);
+        });
         for(const p of pool5){
           if(assigned>=need)break;
           newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
@@ -656,11 +666,15 @@ function generateSchedule(physicians,year,month,existingAssignments){
           if((shiftCounts[p.id]||0)>=(p.maxShifts||99))continue;
           // Weekend block for วนนอก period
           if(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))continue;
-          // Relax chain limit for underMin: allow up to 5 (instead of 4) when doctor is below min
+          // Normal cap is 4 consecutive (8เว้น8). Relax ONLY when below min, and
+          // only as far as needed: up to 6 for a big deficit, 5 for a small one.
+          // The sort below still prefers any ≤4 option first, so 5–6 is used only
+          // when no ≤4 slot exists for this doctor.
           const deficit=(p.minShifts||0)-(shiftCounts[p.id]||0);
           const chainMax=deficit>=3?6:deficit>=1?5:4;
-          if(getRunLength(p.id,date,sh,newAssignments)>chainMax)continue;
-          candidates.push({date,sh,slotCount});
+          const run=getRunLength(p.id,date,sh,newAssignments);
+          if(run>chainMax)continue;
+          candidates.push({date,sh,slotCount,run});
         }
       }
       if(candidates.length===0)continue;
@@ -669,6 +683,9 @@ function generateSchedule(physicians,year,month,existingAssignments){
       const pTotu=(pTCu.morning||0)+(pTCu.evening||0)+(pTCu.night||0);
       const isHalfU=(p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง");
       candidates.sort((a,b)=>{
+        // Keep chains ≤4 whenever possible — only spill to 5–6 if no ≤4 slot exists.
+        const aOver=a.run>4?1:0,bOver=b.run>4?1:0;
+        if(aOver!==bOver)return aOver-bOver;
         // Strongly prefer shift type furthest below equal 1/3 share
         const aShare=pTotu===0?0:(pTCu[a.sh]||0)/pTotu;
         const bShare=pTotu===0?0:(pTCu[b.sh]||0)/pTotu;
