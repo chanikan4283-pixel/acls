@@ -1117,28 +1117,30 @@ function DaysOffPicker({year,month,selected,onChange,shiftsOff,onShiftsOffChange
         <div key={ri} className="grid grid-cols-7">
           {Array(7).fill(null).map((_,ci)=>{
             const d=row[ci]||null;
-            if(!d)return<div key={ci} className="h-10 bg-slate-50/50"/>;
+            if(!d)return<div key={ci} className="bg-slate-50/50 min-h-[3.25rem]"/>;
             const ds=dateStr(year,month,d);
             const off=selected.includes(ds);
             const we=isWeekend(ds);
             const shiftKeys={morning:ds+"_morning",evening:ds+"_evening",night:ds+"_night"};
             return(
-              <div key={ci} className="border-t border-slate-100 flex flex-col items-center py-0.5">
+              <div key={ci} className="border-t border-slate-100 flex flex-col items-center px-0.5 py-1 min-h-[3.25rem]">
                 <button type="button" onClick={()=>toggle(d)}
-                  className={`w-8 h-8 rounded-full text-sm font-semibold transition-all
+                  className={`w-7 h-7 sm:w-8 sm:h-8 flex items-center justify-center rounded-full text-xs sm:text-sm font-semibold transition-all
                     ${off?"bg-red-500 text-white":"hover:bg-slate-100"}
                     ${we&&!off?"text-red-400":""}
                     ${!we&&!off?"text-slate-700":""}`}>
                   {d}
                 </button>
-                {off&&<span className="text-xs text-red-500 font-bold th-tight">หยุด</span>}
-                <div className="flex gap-0.5 mt-0.5">
+                {off&&<span className="text-[10px] sm:text-xs text-red-500 font-bold th-tight">หยุด</span>}
+                {/* 3 shift toggles share the cell width via grid → can never overflow
+                    onto neighbouring days, even on a narrow iPhone column. */}
+                <div className="grid grid-cols-3 gap-px w-full mt-0.5">
                   {[["ช","morning","#3b82f6"],["บ","evening","#f97316"],["ด","night","#7c3aed"]].map(([label,sh,color])=>{
                     const active=safeShiftsOff.includes(shiftKeys[sh]);
                     return(
                       <button key={sh} type="button" onClick={e=>{e.stopPropagation();toggleShiftOff(d,sh);}}
-                        style={active?{backgroundColor:color,color:"#fff",border:`1px solid ${color}`}:{border:"1px solid #cbd5e1",color:"#64748b"}}
-                        className="w-5 h-5 rounded text-xs font-bold leading-none flex items-center justify-center transition-all">
+                        style={active?{backgroundColor:color,color:"#fff",borderColor:color}:{borderColor:"#cbd5e1",color:"#64748b"}}
+                        className="h-4 sm:h-5 w-full min-w-0 rounded border text-[9px] sm:text-[11px] font-bold leading-none flex items-center justify-center transition-all">
                         {label}
                       </button>
                     );
