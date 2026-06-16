@@ -114,40 +114,45 @@ function isChief(p){return p.level==="R2"||p.level==="R3";}
 function loadLS(k,d){try{const v=localStorage.getItem(k);return v!==null?JSON.parse(v):d;}catch{return d;}}
 function saveLS(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch{}}
 
-// Collapse duplicate doctor records that share a NAME *or* an ID into one.
-// Earlier list position = higher priority (local edits go first). The merge is
-// LOSSLESS for day-off data: daysOff / shiftsOff / preferredShifts are UNIONED
-// across every copy, so a day-off the user set on ANY duplicate is never thrown
-// away (the old "keep-first" version silently dropped the other copy's daysOff,
-// which is why a doctor could still be scheduled on a day they asked off).
-// The survivor keeps a canonical "pN" id when one exists so that assignments
-// already pointing at that id stay valid.
+// Collapse duplicate doctor records (same NAME) into one using LAST-WRITE-WINS:
+// the copy with the newest `_mtime` (set on every edit) is authoritative and its
+// daysOff/shiftsOff are taken AS-IS — never unioned. Unioning was wrong: when a
+// user REMOVED a day-off but a stale cloud copy still had it, the union kept
+// resurrecting it (phantom day-offs, always the same days/people). With
+// timestamps, a removal on the freshest copy sticks, while a fresh device with
+// only DEFAULT data (mtime 0) still correctly picks up the cloud's edited copy.
+// The survivor keeps a canonical "pN" id when any copy has one so existing
+// assignment references stay valid.
 function dedupePhysByName(list){
-  const recs=[];
-  const byName=new Map(); // trimmed name -> index in recs
-  const byId=new Map();   // id -> index in recs
+  const mt=p=>(typeof p._mtime==='number'?p._mtime:0);
   const isCanonical=id=>/^p\d+$/.test(id||"");
-  const mergeInto=(t,p)=>{
-    t.daysOff=Array.from(new Set([...(t.daysOff||[]),...(p.daysOff||[])]));
-    t.shiftsOff=Array.from(new Set([...(t.shiftsOff||[]),...(p.shiftsOff||[])]));
-    t.preferredShifts=Array.from(new Set([...(t.preferredShifts||[]),...(p.preferredShifts||[])]));
-    // adopt a canonical id if the kept record doesn't already have one
-    if(!isCanonical(t.id)&&isCanonical(p.id))t.id=p.id;
-  };
+  // 1) group by trimmed name, newest _mtime wins (ties keep earliest = local first)
+  const groups=new Map(); const order=[];
   for(const p of (list||[])){
-    const name=(p.name||"").trim();
-    if(!name)continue;
-    let idx=byName.has(name)?byName.get(name):(byId.has(p.id)?byId.get(p.id):-1);
-    if(idx<0){
-      const rec={...p,daysOff:[...(p.daysOff||[])],shiftsOff:[...(p.shiftsOff||[])],preferredShifts:[...(p.preferredShifts||[])]};
-      idx=recs.length; recs.push(rec);
-    }else{
-      mergeInto(recs[idx],p);
-    }
-    // (re)point both maps at this record — id may have just become canonical
-    byName.set(name,idx); byId.set(recs[idx].id,idx);
+    const name=(p.name||"").trim(); if(!name)continue;
+    if(!groups.has(name)){groups.set(name,[]);order.push(name);}
+    groups.get(name).push(p);
   }
-  return recs;
+  let out=order.map(name=>{
+    const grp=groups.get(name);
+    let best=grp[0]; for(const p of grp){ if(mt(p)>mt(best))best=p; }
+    const rec={...best,
+      daysOff:[...(best.daysOff||[])],
+      shiftsOff:[...(best.shiftsOff||[])],
+      preferredShifts:[...(best.preferredShifts||[])]};
+    if(!isCanonical(rec.id)){ const canon=grp.find(p=>isCanonical(p.id)); if(canon)rec.id=canon.id; }
+    return rec;
+  });
+  // 2) if two surviving records ended up sharing an id (e.g. a rename left two
+  //    names on the same pN), keep the newest to avoid id collisions.
+  const byId=new Map(); const final=[];
+  for(const rec of out){
+    if(byId.has(rec.id)){
+      const ex=byId.get(rec.id);
+      if(mt(rec)>mt(final[ex])) final[ex]=rec; // replace older
+    }else{ byId.set(rec.id,final.length); final.push(rec); }
+  }
+  return final;
 }
 // Re-point assignments that reference a removed duplicate doctor to the surviving
 // record with the same name; drop assignments whose doctor no longer exists at all.
@@ -1207,7 +1212,8 @@ function PhysiciansPage({physicians,setPhysicians,year,month,assignments,setAssi
     const obj={
       id:targetId,name,level:fLevel,rotation:fRotation,
       minShifts:+fMin,targetShifts:+fTarget,maxShifts:+fMax,
-      daysOff:fDaysOff,shiftsOff:fShiftsOff,preferredShifts:fPrefs
+      daysOff:fDaysOff,shiftsOff:fShiftsOff,preferredShifts:fPrefs,
+      _mtime:Date.now() // last-write-wins stamp so this edit beats any stale cloud copy
     };
     if(editId||dup)setPhysicians(prev=>prev.map(p=>p.id===targetId?obj:p));
     else setPhysicians(prev=>[...prev,obj]);
@@ -1373,7 +1379,7 @@ function StaffPortal({physicians,setPhysicians,year,month}){
 
   function handleSave(){
     setPhysicians(prev=>prev.map(x=>x.id===selId
-      ?{...x,daysOff:fDaysOff,preferredShifts:fPrefs,rotation:fRotation}:x));
+      ?{...x,daysOff:fDaysOff,preferredShifts:fPrefs,rotation:fRotation,_mtime:Date.now()}:x));
     setSaved(true);
     setTimeout(()=>setSaved(false),3000);
   }
