@@ -179,8 +179,16 @@ function remapAssignments(assignments,allKnownPhys,keptPhys){
 async function cloudGet(key) {
   if (!SCRIPT_URL) return null;
   try {
-    const r = await fetch(`${SCRIPT_URL}?key=${key}`, {redirect:'follow'});
-    const text = await r.text();
+    // Time-box the request: on a slow/flaky connection a hung fetch must NOT
+    // block the whole app on the loading screen. Abort after 9s and fall back
+    // to local data (the app stays usable and syncs later).
+    const ctrl = new AbortController();
+    const to = setTimeout(()=>ctrl.abort(), 9000);
+    let text;
+    try {
+      const r = await fetch(`${SCRIPT_URL}?key=${key}`, {redirect:'follow', signal:ctrl.signal});
+      text = await r.text();
+    } finally { clearTimeout(to); }
     return JSON.parse(text);
   } catch { return null; }
 }
@@ -2428,7 +2436,11 @@ function App(){
       } catch {}
       setLoading(false);
     }
-    loadFromCloud();
+    // Failsafe: never leave the user stuck on the loading screen. Even if every
+    // cloud request hangs past its own timeout, show the app (with local data)
+    // after 12s and let cloud sync continue in the background.
+    const failsafe = setTimeout(()=>setLoading(false), 12000);
+    loadFromCloud().finally(()=>clearTimeout(failsafe));
   }, []);
 
   const isFirstRender = useRef(true);
