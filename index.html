@@ -5,9 +5,14 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>ERPK – ระบบจัดเวรแพทย์</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<!-- Versions PINNED on purpose. Unpinned @babel/standalone auto-upgraded to v8,
+     whose React preset defaults to the automatic JSX runtime (emits `import
+     "react/jsx-runtime"`). In a classic non-module script with global React that
+     import throws → blank white screen. Babel 7.x keeps the classic runtime
+     (React.createElement), so the inline JSX below works. Do not un-pin. -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
 <style>
 /* Cross-platform font stack. -apple-system/BlinkMacSystemFont give SF Pro on
    iOS/macOS (renders Thai cleanly via the system Thai face); Sukhumvit Set &
