@@ -53,7 +53,7 @@ const LV_BD={R1:"#93c5fd",R2:"#86efac",R3:"#fde047"};
 const LV_FG={R1:"#1e40af",R2:"#166534",R3:"#713f12"};
 // เช้า ต้องได้อย่างน้อย 3 (สูงสุด 3), บ่าย อย่างน้อย 3 และเพิ่มเป็น 4 ได้เมื่อจำเป็น,
 // ดึก 2 คงที่. ถ้าจัดไม่ครบ min จะถูกรายงานพร้อมเหตุผล (ใครขอหยุด ฯลฯ).
-const STAFFING={morning:{min:3,max:3},evening:{min:3,max:4},night:{min:2,max:2}};
+const STAFFING={morning:{min:2,max:3},evening:{min:3,max:4},night:{min:2,max:2}};
 const STAFFING_EXT={evening:4,night:2}; // บ่ายขยายถึง 4 เมื่อเช้าเต็ม; ดึกไม่ขยายเกิน 2
 const STAFFING_FLEX={morning:{max:3},evening:{max:4}}; // evening expanded first if slot < min
 const ROTATIONS=["วนใน","วนนอก","วนนอกครึ่งเดือนแรก","วนนอกครึ่งเดือนหลัง"];
@@ -563,11 +563,13 @@ function generateSchedule(physicians,year,month,existingAssignments){
         }
       }
 
-      // Pass 4: overflow — ignore maxShifts but still enforce chain limit and same-day conflicts
+      // Pass 4: same as Pass 3 but drop the weekend soft-preference. Still respects
+      // the HARD max — no one is ever pushed past their maxShifts.
       if(assigned<need){
         const pool4=physicians.filter(p=>
           !fixedPids.has(p.id)&&
           !(p.daysOff||[]).includes(date)&&
+          (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
           isAvailableForSlot(p,date,shift)&&
           !hasImmediateConflict(p.id,date,shift,newAssignments)&&
           !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
@@ -584,15 +586,16 @@ function generateSchedule(physicians,year,month,existingAssignments){
         }
       }
 
-      // Pass 5: last resort to reach MIN. Coverage (≥2 per slot) is the top
-      // priority, so here we ALLOW the 8เว้น8 chain to exceed 4 if that is the only
-      // way to fill the slot — but still prefer doctors whose chain stays ≤4, and
-      // never break the truly-hard rules (day-off, shift-off, rotation, weekend,
-      // 0-hr gap). Any resulting chain>4 is reported afterwards.
+      // Pass 5: last resort to reach MIN. We ALLOW the 8เว้น8 chain to exceed 4 if
+      // that is the only way to fill the slot (preferring chains ≤4), but we NEVER
+      // break the truly-hard rules — day-off, shift-off, rotation, weekend, 0-hr gap,
+      // and the maxShifts ceiling. If the slot still can't be filled within everyone's
+      // max, it is left short and reported (with the reason) below.
       if(assigned<need){
         const pool5=physicians.filter(p=>
           !fixedPids.has(p.id)&&
           !(p.daysOff||[]).includes(date)&&
+          (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
           isAvailableForSlot(p,date,shift)&&
           !hasImmediateConflict(p.id,date,shift,newAssignments)&&
           !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
@@ -632,6 +635,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         !existingPids.has(p.id)&&
         !(p.daysOff||[]).includes(date)&&
         !(p.shiftsOff||[]).includes(date+"_"+shift)&&
+        (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
         isAvailableForSlot(p,date,shift)&&
         !hasImmediateConflict(p.id,date,shift,newAssignments)
       );
@@ -833,8 +837,40 @@ function generateSchedule(physicians,year,month,existingAssignments){
     }
   }
 
-  // Post-processing: cluster rest days into pairs
-  clusterRestDays(physicians,newAssignments,year,month);
+  // Post-processing: cluster rest days into pairs.
+  // DISABLED — its shift-swaps could tip a doctor 1 over their maxShifts in a way
+  // that couldn't be undone without breaking a slot's min or chief. Correctness
+  // (never exceed max) matters more than the cosmetic rest-day clustering.
+  // clusterRestDays(physicians,newAssignments,year,month);
+
+  // ── HARD max ceiling sweep ───────────────────────────────────────────────
+  // maxShifts must never be exceeded. Rest-day clustering can tip a doctor 1 over,
+  // so strip any excess non-locked/non-manual shift here — taken from the most
+  // over-staffed slot first, never dropping a slot below its min, and never
+  // removing the last chief of a slot.
+  {
+    const mPfx=`${year}-${String(month).padStart(2,'0')}`;
+    for(const p of physicians){
+      const mx=p.maxShifts||99;
+      const cnt=()=>newAssignments.filter(a=>a.physicianId===p.id&&a.date.startsWith(mPfx)).length;
+      if(cnt()<=mx)continue;
+      const removable=newAssignments
+        .filter(a=>a.physicianId===p.id&&a.date.startsWith(mPfx)&&!a.isLocked&&!a.isManual)
+        .sort((a,b)=>newAssignments.filter(x=>x.date===b.date&&x.shiftType===b.shiftType).length
+                    -newAssignments.filter(x=>x.date===a.date&&x.shiftType===a.shiftType).length);
+      for(const a of removable){
+        if(cnt()<=mx)break;
+        const slotArr=newAssignments.filter(x=>x.date===a.date&&x.shiftType===a.shiftType);
+        if(slotArr.length<=STAFFING[a.shiftType].min)continue; // keep the slot at/above min
+        if(isChief(p)&&!slotArr.some(x=>x.physicianId!==p.id&&isChief(physMap[x.physicianId])))continue; // keep the only chief
+        const idx=newAssignments.indexOf(a);
+        if(idx<0)continue;
+        newAssignments.splice(idx,1);
+        if(shiftCounts[p.id])shiftCounts[p.id]=Math.max(0,shiftCounts[p.id]-1);
+        if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][a.shiftType]=Math.max(0,(shiftTypeCounts[p.id][a.shiftType]||0)-1);
+      }
+    }
+  }
 
   // ── FINAL chief guarantee ───────────────────────────────────────────────
   // Runs LAST (after every fill/expansion/rest-clustering step) so nothing can
@@ -856,6 +892,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         isChief(p)&&!existingPids.has(p.id)&&
         !(p.daysOff||[]).includes(date)&&
         !(p.shiftsOff||[]).includes(date+"_"+shift)&&
+        (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
         isAvailableForSlot(p,date,shift)&&
         !hasImmediateConflict(p.id,date,shift,newAssignments)&&
         !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
@@ -991,6 +1028,11 @@ function clusterRestDays(physicians,assignments,year,month){
         if(donorRun>4)continue;
         // Verify p won't drop below min
         if(counts[p.id]-1<min)continue;
+        // HARD max guard: recount the donor's ACTUAL month total right now and never
+        // push them past their max (the cached counts can drift across swaps, which was
+        // letting a donor tip 1 over max).
+        const donorActual=assignments.filter(a=>a.physicianId===donor.id&&a.date.startsWith(monthPrefix)).length;
+        if(donorActual>=(donor.maxShifts||99))continue;
         // Perform swap: remove p's assignment, add donor's
         const idx=assignments.indexOf(shiftToMove);
         if(idx<0)continue;
