@@ -999,6 +999,44 @@ function generateSchedule(physicians,year,month,existingAssignments){
     }
   }
 
+  // ── Prefer เช้า 3 over บ่าย 4 (user priority) ─────────────────────────────
+  // ถ้าวันไหนเวรบ่ายมี 4 คน แต่เวรเช้ายังไม่ถึงเป้า (วันธรรมดา 3) ให้ "ย้าย" คนจากบ่าย
+  // มาเช้าวันเดียวกัน — เป็นการย้าย (จำนวนเวรรวมของคนนั้นไม่เปลี่ยน จึงไม่กระทบ max/min).
+  // เคารพ rotation (วนนอกอยู่เช้าไม่ได้), shift-off, 0-gap, chain≤5, ไม่ย้ายเวรที่ล็อก/
+  // แก้มือ และไม่ทิ้งเวรบ่ายให้ไร้ชีฟ. บ่ายหลังย้ายเหลือ 3 = ยังถึงเป้า.
+  for(let d=1;d<=days;d++){
+    const date=dateStr(year,month,d);
+    const mTarget=targetFor(date,"morning");
+    while(true){
+      const morning=newAssignments.filter(a=>a.date===date&&a.shiftType==="morning");
+      const evening=newAssignments.filter(a=>a.date===date&&a.shiftType==="evening");
+      if(morning.length>=mTarget||evening.length<=3)break;
+      const morningPids=new Set(morning.map(a=>a.physicianId));
+      const cand=evening.filter(a=>{
+        if(a.isLocked||a.isManual)return false;
+        const p=physMap[a.physicianId];
+        if(!p)return false;
+        if(morningPids.has(p.id))return false;
+        if((p.shiftsOff||[]).includes(date+"_morning"))return false;
+        if(!isAvailableForSlot(p,date,"morning"))return false;
+        const without=newAssignments.filter(x=>x!==a); // evaluate as if their บ่าย is gone
+        if(hasImmediateConflict(p.id,date,"morning",without))return false;
+        if(without.filter(x=>x.date===date&&x.physicianId===p.id).map(x=>x.shiftType).some(s=>isConsecutiveConflict(s,"morning")))return false;
+        if(getRunLength(p.id,date,"morning",without)>5)return false;
+        if(isChief(p)&&!evening.some(x=>x!==a&&physMap[x.physicianId]&&isChief(physMap[x.physicianId])))return false; // keep บ่าย's chief
+        return true;
+      }).sort((x,y)=>((physMap[x.physicianId]&&isChief(physMap[x.physicianId]))?1:0)-((physMap[y.physicianId]&&isChief(physMap[y.physicianId]))?1:0)); // move non-chief first
+      if(cand.length===0)break;
+      const mv=cand[0];
+      const idx=newAssignments.indexOf(mv);
+      newAssignments.splice(idx,1);
+      if(shiftTypeCounts[mv.physicianId])shiftTypeCounts[mv.physicianId]["evening"]=Math.max(0,(shiftTypeCounts[mv.physicianId]["evening"]||0)-1);
+      newAssignments.push({id:uid(),physicianId:mv.physicianId,date,shiftType:"morning",isLocked:false,isManual:false});
+      if(shiftTypeCounts[mv.physicianId])shiftTypeCounts[mv.physicianId]["morning"]=(shiftTypeCounts[mv.physicianId]["morning"]||0)+1;
+      // shiftCounts unchanged — this is a move, not an add
+    }
+  }
+
   // Post-processing: cluster rest days into pairs.
   // DISABLED — its shift-swaps could tip a doctor 1 over their maxShifts in a way
   // that couldn't be undone without breaking a slot's min or chief. Correctness
