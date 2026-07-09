@@ -63,7 +63,7 @@ const STAFFING_FLEX={morning:{max:3},evening:{max:4}}; // evening expanded first
 // เช้า floor 2 ทั้งวันธรรมดา/เสาร์อาทิตย์ (การันตีอย่างน้อย 2), บ่าย 3, ดึก 2.
 function minFor(date,shift){
   if(shift==="morning")return 2;
-  if(shift==="evening")return 3;
+  if(shift==="evening")return 2; // HARD floor 2 (target 3, see targetFor) — บ่ายลงมา 2 ได้เมื่อคนไม่พอ
   return 2; // night
 }
 // targetFor = เป้าหมายที่อยากได้ (เติมให้ถึงเมื่อมีคนเหลือ ไม่เกิน max): เช้าวันธรรมดา 3,
@@ -828,9 +828,49 @@ function generateSchedule(physicians,year,month,existingAssignments){
     if(!anyAdded)break;
   }
 
+  // Any slot still below its HARD min? If so, capacity is too tight to spend on
+  // OPTIONAL extras (เช้า3 / บ่าย4 / ดึก3) — every remaining doctor-shift must be
+  // reserved for reaching min. Skipping the extra phases here frees that capacity
+  // for the coverage-rebalance below, which is the difference between a tight month
+  // packing and failing by a few end-of-month shifts.
+  const monthHasDeficit=()=>{
+    for(let dd=1;dd<=days;dd++)for(const s2 of SHIFTS){
+      const dt=dateStr(year,month,dd);
+      if(newAssignments.filter(a=>a.date===dt&&a.shiftType===s2).length<minFor(dt,s2))return true;
+    }
+    return false;
+  };
+
+  // ── Push evening 2 → 3 (TARGET) — higher priority than เช้า3 ───────────────
+  // บ่าย hard-floor คือ 2 (ครอบไปแล้ว) แต่เป้าหมายคือ 3 และสำคัญกว่าเช้า3. ดันบ่ายขึ้น 3
+  // ก่อน (ด้วยคนที่เหลือ ไม่เกิน max, chain≤5) — ถ้าคนไม่พอก็คงไว้ที่ 2 ตามที่ผู้ใช้กำหนด.
+  // Gated: only once every slot already meets its hard floor (2/2/2).
+  if(!monthHasDeficit())
+  for(let d=1;d<=days;d++){
+    const date=dateStr(year,month,d);
+    if(newAssignments.filter(a=>a.date===date&&a.shiftType==="evening").length>=3)continue;
+    const pool=physicians.filter(p=>
+      !newAssignments.some(a=>a.date===date&&a.shiftType==="evening"&&a.physicianId===p.id)&&
+      !(p.daysOff||[]).includes(date)&&!(p.shiftsOff||[]).includes(date+"_evening")&&
+      (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+      isAvailableForSlot(p,date,"evening")&&
+      !hasImmediateConflict(p.id,date,"evening",newAssignments)&&
+      !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"evening"))&&
+      !((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)&&
+      getRunLength(p.id,date,"evening",newAssignments)<=5
+    ).sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+    if(pool.length===0)continue;
+    const p=pool[0];
+    newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:"evening",isLocked:false,isManual:false});
+    shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+    if(shiftTypeCounts[p.id])shiftTypeCounts[p.id]["evening"]=(shiftTypeCounts[p.id]["evening"]||0)+1;
+  }
+
   // ── Push weekday morning 2 → 3 when there is SPARE capacity ───────────────
   // เช้าถูกการันตีที่ floor 2 ไปแล้ว. ตรงนี้ดันเช้าวันธรรมดาให้เป็น 3 เท่าที่มีคนเหลือ
   // (เฉพาะ วนใน ที่ยังไม่เกิน max, ไม่หยุด, chain≤5) — ถ้าคนไม่พอก็คงไว้ที่ 2.
+  // Gated: only when the whole month already meets min (no capacity to spare otherwise).
+  if(!monthHasDeficit())
   for(let d=1;d<=days;d++){
     const date=dateStr(year,month,d);
     if(targetFor(date,"morning")<3)continue; // weekend stays at 2
@@ -852,6 +892,8 @@ function generateSchedule(physicians,year,month,existingAssignments){
   }
 
   // Phase E4: evening → 4 per slot (only on days where morning is already 3)
+  // Gated: skip while any slot is below min — that capacity is needed for coverage.
+  if(!monthHasDeficit())
   for(let d=1;d<=days;d++){
     const date=dateStr(year,month,d);
     const morningFull=newAssignments.filter(a=>a.date===date&&a.shiftType==="morning").length>=3;
@@ -879,6 +921,8 @@ function generateSchedule(physicians,year,month,existingAssignments){
   }
 
   // Phase N3: night → 3 per slot (only on days where morning is already 3)
+  // Gated: skip while any slot is below min — that capacity is needed for coverage.
+  if(!monthHasDeficit())
   for(let d=1;d<=days;d++){
     const date=dateStr(year,month,d);
     const morningFull=newAssignments.filter(a=>a.date===date&&a.shiftType==="morning").length>=3;
@@ -928,7 +972,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
       for(const a of removable){
         if(cnt()<=mx)break;
         const slotArr=newAssignments.filter(x=>x.date===a.date&&x.shiftType===a.shiftType);
-        if(slotArr.length<=STAFFING[a.shiftType].min)continue; // keep the slot at/above min
+        if(slotArr.length<=minFor(a.date,a.shiftType))continue; // keep the slot at/above its hard floor
         if(isChief(p)&&!slotArr.some(x=>x.physicianId!==p.id&&isChief(physMap[x.physicianId])))continue; // keep the only chief
         const idx=newAssignments.indexOf(a);
         if(idx<0)continue;
@@ -990,6 +1034,61 @@ function generateSchedule(physicians,year,month,existingAssignments){
       shiftCounts[victim.physicianId]=(shiftCounts[victim.physicianId]||0)-1;
       if(shiftTypeCounts[victim.physicianId])shiftTypeCounts[victim.physicianId][shift]=Math.max(0,(shiftTypeCounts[victim.physicianId][shift]||0)-1);
       addChief();
+    }
+  }
+
+  // ── COVERAGE REBALANCE ───────────────────────────────────────────────────
+  // On a tight roster the greedy fill can leave a late-month slot BELOW its min
+  // while an earlier slot sits ABOVE min (or holds an optional เช้า3/บ่าย4 extra).
+  // Recover the packing by MOVING a movable shift from an over-min slot to the
+  // deficient slot — this is a MOVE (the doctor's total is unchanged, so no one
+  // is pushed over max). Respects day-off/shift-off/rotation/weekend/consecutive/
+  // chain≤5, never drops a donor slot below its min, never removes a slot's only
+  // chief. This is what makes a zero-slack month (min demand == capacity) actually
+  // pack, instead of failing by a few end-of-month shifts.
+  {
+    const mPfx=`${year}-${String(month).padStart(2,'0')}`;
+    let moved=true,guard=0;
+    while(moved&&guard++<400){
+      moved=false;
+      for(let d=1;d<=days&&!moved;d++)for(const shift of SHIFTS){
+        const date=dateStr(year,month,d);
+        const slotArr=newAssignments.filter(a=>a.date===date&&a.shiftType===shift);
+        if(slotArr.length>=minFor(date,shift))continue; // this slot is already covered
+        const inSlot=new Set(slotArr.map(a=>a.physicianId));
+        // doctors who could legally work this deficient slot
+        const cands=physicians.filter(p=>
+          !inSlot.has(p.id)&&
+          !(p.daysOff||[]).includes(date)&&!(p.shiftsOff||[]).includes(date+"_"+shift)&&
+          isAvailableForSlot(p,date,shift)&&
+          !hasImmediateConflict(p.id,date,shift,newAssignments)&&
+          !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
+        );
+        for(const p of cands){
+          // find a removable shift of p sitting in an ABOVE-min slot elsewhere
+          const donors=newAssignments.filter(a=>a.physicianId===p.id&&a.date.startsWith(mPfx)&&!a.isLocked&&!a.isManual&&!(a.date===date&&a.shiftType===shift));
+          let donorShift=null;
+          for(const a2 of donors){
+            const s2=newAssignments.filter(x=>x.date===a2.date&&x.shiftType===a2.shiftType);
+            if(s2.length<=minFor(a2.date,a2.shiftType))continue;                 // would drop donor slot below min
+            if(isChief(p)&&!s2.some(x=>x.physicianId!==p.id&&isChief(physMap[x.physicianId])))continue; // donor slot's only chief
+            donorShift=a2;break;
+          }
+          if(!donorShift)continue;
+          // ensure the move doesn't build a chain>5 at the new slot (evaluate without the donor)
+          const without=newAssignments.filter(a=>a!==donorShift);
+          if(getRunLength(p.id,date,shift,without)>5)continue;
+          const di=newAssignments.indexOf(donorShift);
+          if(di<0)continue;
+          const oldSh=donorShift.shiftType;
+          newAssignments.splice(di,1);
+          if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][oldSh]=Math.max(0,(shiftTypeCounts[p.id][oldSh]||0)-1);
+          newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
+          if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][shift]=(shiftTypeCounts[p.id][shift]||0)+1;
+          // shiftCounts[p.id] unchanged — this is a move, not an add
+          moved=true;break;
+        }
+      }
     }
   }
 
@@ -1056,6 +1155,11 @@ function generateSchedule(physicians,year,month,existingAssignments){
         if(maxed.length)parts.push(`ชีฟเวรเต็มโควตา: ${maxed.join(', ')}`);
         if(other.length)parts.push(`ชีฟติดเงื่อนไข (วนนอก/เสาร์อาทิตย์/เวรชนกัน): ${other.join(', ')}`);
         warnings.push(`${lbl}: ไม่มีชีฟ (R2/R3) — ${parts.join(' | ')||'ชีฟไม่ว่าง'} — วิธีแก้: ให้ชีฟคนใดคนหนึ่งเปิดวันนี้ หรือเพิ่ม Max เวรของชีฟ`);
+      }
+      // (2b) Evening below TARGET (got 2, wanted 3) — allowed fallback, but tell the
+      // user which days landed at 2 and why, so they can add capacity if they want 3.
+      if(shift==="evening"&&slot.length>=minFor(date,shift)&&slot.length<targetFor(date,shift)){
+        warnings.push(`${lbl}: ได้ ${slot.length} คน (เป้า ${targetFor(date,shift)}) — คนไม่พอเลยลดบ่ายเหลือ ${slot.length} วันนี้ — วิธีแก้: เพิ่ม Max เวร หรือเพิ่มแพทย์ ถ้าอยากได้ครบ ${targetFor(date,shift)}`);
       }
     }
   }
