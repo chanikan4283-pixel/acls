@@ -416,6 +416,16 @@ function generateSchedule(physicians,year,month,existingAssignments){
     fixed.forEach(a=>{if(a.physicianId===p.id&&shiftTypeCounts[p.id][a.shiftType]!==undefined)shiftTypeCounts[p.id][a.shiftType]++;});
   });
 
+  // ── Pre-flight: doctors that are SILENTLY excluded ────────────────────────
+  // A doctor with Max ≤ 0 (blank/unset counts as 0) can never be scheduled — every
+  // phase filters them out — so the workload piles onto the rest and slots fall
+  // below min. This is the #1 cause of "จัดไม่ได้ / บางคนไม่มีเวรเลย" that looks like
+  // a logic bug but is really a roster-config mistake. Surface it LOUDLY up front.
+  const disabled=physicians.filter(p=>!((p.maxShifts||0)>0)).map(p=>p.name);
+  if(disabled.length){
+    warnings.push(`⛔ แพทย์ที่ตั้ง Max = 0 (หรือยังไม่ได้ตั้ง) จะ "ไม่ถูกจัดเวรเลย" และทำให้คนอื่นรับภาระหนัก/เวรไม่ครบ: ${disabled.join(', ')} — วิธีแก้: ไปตั้ง Max เวร ให้มากกว่า 0 ก่อนกดสร้างตาราง`);
+  }
+
   const days=daysInMonth(year,month);
   // ── Fill slots TIGHTEST-FIRST ───────────────────────────────────────────
   // Where many doctors requested off, the slot has the fewest candidates, so we
