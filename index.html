@@ -397,7 +397,12 @@ function validateCanGenerate(physicians,year,month){
 function generateSchedule(physicians,year,month,existingAssignments){
   const errors=[];
   const warnings=[];
-  // fixed = locked/manual assignments, BUT exclude any where the doctor now has a daysOff
+  const genPfx=`${year}-${String(month).padStart(2,'0')}`;
+  // fixed = locked/manual assignments, BUT exclude any where the doctor now has a daysOff.
+  // Kept for ALL months (other months' locked shifts give chain/conflict context at
+  // month boundaries, e.g. 31 ก.ค. ดึก ชนกับ 1 ส.ค. เช้า) — but QUOTAS are per-month, so
+  // shiftCounts below counts ONLY this month. Counting all months was the bug that made
+  // every doctor with a locked July look "เต็มโควตา" from day 1 of August.
   const physMap=Object.fromEntries(physicians.map(p=>[p.id,p]));
   const fixed=existingAssignments.filter(a=>{
     if(!a.isLocked&&!a.isManual)return false;
@@ -406,14 +411,17 @@ function generateSchedule(physicians,year,month,existingAssignments){
     if((p.daysOff||[]).includes(a.date))return false; // doctor now has day off — drop even if locked
     return true;
   });
+  // Non-locked assignments of OTHER months: not touched by this generate — carried
+  // through to the returned list so generating August never wipes July's data.
+  const otherMonthsUnlocked=existingAssignments.filter(a=>!a.date.startsWith(genPfx)&&!a.isLocked&&!a.isManual);
   const newAssignments=[...fixed];
   const shiftCounts={};
   // Track per-shift-type counts for balanced morning/evening/night distribution
   const shiftTypeCounts={};
   physicians.forEach(p=>{
-    shiftCounts[p.id]=fixed.filter(a=>a.physicianId===p.id).length;
+    shiftCounts[p.id]=fixed.filter(a=>a.physicianId===p.id&&a.date.startsWith(genPfx)).length; // THIS month only
     shiftTypeCounts[p.id]={morning:0,evening:0,night:0};
-    fixed.forEach(a=>{if(a.physicianId===p.id&&shiftTypeCounts[p.id][a.shiftType]!==undefined)shiftTypeCounts[p.id][a.shiftType]++;});
+    fixed.forEach(a=>{if(a.physicianId===p.id&&a.date.startsWith(genPfx)&&shiftTypeCounts[p.id][a.shiftType]!==undefined)shiftTypeCounts[p.id][a.shiftType]++;});
   });
 
   // ── Pre-flight: doctors that are SILENTLY excluded ────────────────────────
@@ -423,7 +431,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
   // a logic bug but is really a roster-config mistake. Surface it LOUDLY up front.
   const disabled=physicians.filter(p=>!((p.maxShifts||0)>0)).map(p=>p.name);
   if(disabled.length){
-    warnings.push(`⛔ แพทย์ที่ตั้ง Max = 0 (หรือยังไม่ได้ตั้ง) จะ "ไม่ถูกจัดเวรเลย" และทำให้คนอื่นรับภาระหนัก/เวรไม่ครบ: ${disabled.join(', ')} — วิธีแก้: ไปตั้ง Max เวร ให้มากกว่า 0 ก่อนกดสร้างตาราง`);
+    warnings.push(`ℹ แพทย์ที่ Max = 0 จะไม่ถูกจัดเวรเดือนนี้เลย: ${disabled.join(', ')} — ถ้าตั้งใจ (ไม่อยู่ทั้งเดือน) ไม่ต้องแก้ / ถ้าไม่ได้ตั้งใจ ให้ไปตั้ง Max ให้มากกว่า 0`);
   }
   // Min > Max is a config mistake (ใส่สลับ): the doctor can never "reach min" because
   // max caps them first. The engine simply uses Max as the ceiling; warn so it gets fixed.
@@ -1200,8 +1208,10 @@ function generateSchedule(physicians,year,month,existingAssignments){
     flush();
   }
 
-  // HARD FINAL GUARD: strip every assignment where doctor has daysOff — no exceptions
-  const finalAssignments=newAssignments.filter(a=>{
+  // HARD FINAL GUARD: strip every assignment where doctor has daysOff — no exceptions.
+  // Then merge back the untouched non-locked assignments of OTHER months, so a
+  // generate for one month can never erase another month's schedule.
+  const finalAssignments=[...otherMonthsUnlocked,...newAssignments].filter(a=>{
     const p=physMap[a.physicianId];
     return !p||(!(p.daysOff||[]).includes(a.date));
   });
