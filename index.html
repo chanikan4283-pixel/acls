@@ -466,38 +466,57 @@ function generateSchedule(physicians,year,month,existingAssignments){
   }
   slotOrder.sort((a,b)=>a.availCount-b.availCount||a.chiefAvail-b.chiefAvail||a.date.localeCompare(b.date)||SHIFTS.indexOf(a.shift)-SHIFTS.indexOf(b.shift));
 
-  // ── Reserve one chief for every EVENING slot FIRST ───────────────────────
-  // เวรเช้า/ดึก มีแต่ วนใน (ชีฟทั้งหมด) อยู่แล้ว แต่เวรบ่ายอาจเป็น วนนอก (R1) ล้วน = ไม่มีชีฟ.
-  // ถ้าปล่อยให้เวรเช้า(3)+ดึก(2) ใช้ วนใน จนหมดก่อน เวรบ่ายจะไม่เหลือชีฟ. จึงจองชีฟ 1 คน
-  // ให้ทุกเวรบ่ายไว้ก่อน (คนที่เวรน้อยสุด, ไม่เกิน max, เคารพวันหยุด/gap/chain).
-  for(let d=1;d<=days;d++){
-    const date=dateStr(year,month,d), shift="evening";
-    const slotFixed=fixed.filter(a=>a.date===date&&a.shiftType===shift);
-    if(slotFixed.some(a=>{const p=physMap[a.physicianId];return p&&isChief(p);}))continue;
-    const inSlot=new Set(newAssignments.filter(a=>a.date===date&&a.shiftType===shift).map(a=>a.physicianId));
-    const cpool=physicians.filter(p=>
-      isChief(p)&&!inSlot.has(p.id)&&
-      !(p.daysOff||[]).includes(date)&&!(p.shiftsOff||[]).includes(date+"_"+shift)&&
-      (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
-      isAvailableForSlot(p,date,shift)&&
-      !hasImmediateConflict(p.id,date,shift,newAssignments)&&
-      !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
-      getRunLength(p.id,date,shift,newAssignments)<=5
-    ).sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
-    if(cpool.length===0)continue;
-    const p=cpool[0];
-    newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
-    shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
-    if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][shift]=(shiftTypeCounts[p.id][shift]||0)+1;
+  // ── Reserve one chief for EVERY slot FIRST (ชีฟทุกเวร = priority 4) ───────
+  // ก่อนเติมเวรทั่วไป จองชีฟ 1 คนให้ทุกเวรของทั้งเดือน เรียงจากเวรที่ "ชีฟว่างน้อยสุด"
+  // ก่อน (เช่น เวรบ่ายที่วนนอกล้วน, ปลายเดือนที่ชีฟใกล้เต็ม max) — เดิมจองเฉพาะเวรบ่าย
+  // ทำให้การเติมเวรทั่วไปกินโควตาชีฟไปก่อน แล้วเวรเช้า/ดึกปลายเดือนไม่เหลือชีฟ.
+  // เคารพ max/วันหยุด/gap/chain เสมอ (การจองไม่ทำให้ใครเกิน max).
+  {
+    const chiefSlots=[];
+    for(let d=1;d<=days;d++)for(const shift of SHIFTS){
+      const date=dateStr(year,month,d);
+      const cAvail=physicians.filter(p=>
+        isChief(p)&&
+        !(p.daysOff||[]).includes(date)&&!(p.shiftsOff||[]).includes(date+"_"+shift)&&
+        (p.maxShifts||0)>0&&
+        isAvailableForSlot(p,date,shift)
+      ).length;
+      chiefSlots.push({date,shift,cAvail});
+    }
+    chiefSlots.sort((a,b)=>a.cAvail-b.cAvail||a.date.localeCompare(b.date)||SHIFTS.indexOf(a.shift)-SHIFTS.indexOf(b.shift));
+    for(const {date,shift} of chiefSlots){
+      const members=newAssignments.filter(a=>a.date===date&&a.shiftType===shift);
+      if(members.some(a=>{const p=physMap[a.physicianId];return p&&isChief(p);}))continue;
+      const inSlot=new Set(members.map(a=>a.physicianId));
+      const cpool=physicians.filter(p=>
+        isChief(p)&&!inSlot.has(p.id)&&
+        !(p.daysOff||[]).includes(date)&&!(p.shiftsOff||[]).includes(date+"_"+shift)&&
+        (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
+        isAvailableForSlot(p,date,shift)&&
+        !hasImmediateConflict(p.id,date,shift,newAssignments)&&
+        !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
+        getRunLength(p.id,date,shift,newAssignments)<=5
+      ).sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
+      if(cpool.length===0)continue;
+      const p=cpool[0];
+      newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
+      shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+      if(shiftTypeCounts[p.id])shiftTypeCounts[p.id][shift]=(shiftTypeCounts[p.id][shift]||0)+1;
+    }
   }
 
   for(const _slot of slotOrder){
     {
       const {d,date,shift}=_slot;
-      const slotFixed=fixed.filter(a=>a.date===date&&a.shiftType===shift);
-      const fixedPids=new Set(slotFixed.map(a=>a.physicianId));
-      let chiefInSlot=slotFixed.some(a=>{const p=physicians.find(x=>x.id===a.physicianId);return p&&isChief(p);});
-      const need=Math.max(0,minFor(date,shift)-slotFixed.length);
+      // Count EVERYONE already in this slot — locked/manual AND anything placed by
+      // earlier passes (e.g. the reserved chief). Counting only `fixed` here made
+      // `need` too high and, worse, let the reserved chief be added a SECOND time
+      // to the same slot (the จิรพนธ์×2 duplicate bug): same-shift re-adds are not
+      // caught by the gap/consecutive checks, only by this membership set.
+      const slotMembers=newAssignments.filter(a=>a.date===date&&a.shiftType===shift);
+      const fixedPids=new Set(slotMembers.map(a=>a.physicianId));
+      let chiefInSlot=slotMembers.some(a=>{const p=physicians.find(x=>x.id===a.physicianId);return p&&isChief(p);});
+      const need=Math.max(0,minFor(date,shift)-slotMembers.length);
       if(need===0)continue;
 
       let pool=physicians.filter(p=>
@@ -1211,7 +1230,17 @@ function generateSchedule(physicians,year,month,existingAssignments){
   // HARD FINAL GUARD: strip every assignment where doctor has daysOff — no exceptions.
   // Then merge back the untouched non-locked assignments of OTHER months, so a
   // generate for one month can never erase another month's schedule.
-  const finalAssignments=[...otherMonthsUnlocked,...newAssignments].filter(a=>{
+  // DEDUPE: the same doctor must never appear twice in one slot — old locked data
+  // can contain such duplicates (from earlier bugs/manual edits); locked/manual wins.
+  const _dupSeen=new Set();
+  const _deduped=[];
+  for(const a of [...otherMonthsUnlocked,...newAssignments].sort((x,y)=>((y.isLocked||y.isManual)?1:0)-((x.isLocked||x.isManual)?1:0))){
+    const k=a.physicianId+'|'+a.date+'|'+a.shiftType;
+    if(_dupSeen.has(k))continue;
+    _dupSeen.add(k);
+    _deduped.push(a);
+  }
+  const finalAssignments=_deduped.filter(a=>{
     const p=physMap[a.physicianId];
     return !p||(!(p.daysOff||[]).includes(a.date));
   });
@@ -1835,7 +1864,9 @@ function AddSlotMenu({x,y,date,shift,physicians,assignments,setAssignments,onClo
 
   function addPhys(p){
     pushUndo("เพิ่มเวร");
-    setAssignments(prev=>[...prev,{id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:true}]);
+    setAssignments(prev=>prev.some(a=>a.date===date&&a.shiftType===shift&&a.physicianId===p.id)
+      ?prev // already in this slot — never duplicate
+      :[...prev,{id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:true}]);
     logAction(`➕ เพิ่ม ${p.name} เข้าเวร${SH_SHORT[shift]} ${fmtDate(date)}`);
     onClose();
   }
