@@ -425,6 +425,20 @@ function generateSchedule(physicians,year,month,existingAssignments){
   if(disabled.length){
     warnings.push(`⛔ แพทย์ที่ตั้ง Max = 0 (หรือยังไม่ได้ตั้ง) จะ "ไม่ถูกจัดเวรเลย" และทำให้คนอื่นรับภาระหนัก/เวรไม่ครบ: ${disabled.join(', ')} — วิธีแก้: ไปตั้ง Max เวร ให้มากกว่า 0 ก่อนกดสร้างตาราง`);
   }
+  // Min > Max is a config mistake (ใส่สลับ): the doctor can never "reach min" because
+  // max caps them first. The engine simply uses Max as the ceiling; warn so it gets fixed.
+  const swapped=physicians.filter(p=>(p.maxShifts||0)>0&&(p.minShifts||0)>(p.maxShifts||0));
+  if(swapped.length){
+    warnings.push(`⚠ แพทย์ที่ Min มากกว่า Max (ใส่สลับกัน?): ${swapped.map(p=>`${p.name} (Min ${p.minShifts} > Max ${p.maxShifts})`).join(', ')} — ระบบจะจัดให้ไม่เกิน Max — วิธีแก้: แก้ Min ให้ ≤ Max`);
+  }
+  // Many shift-offs can silently starve slots (คนขอปิดเวรเยอะ = ช่องนั้นเหลือคนไม่พอ).
+  // Count only THIS month's shift-offs so the user can spot stale/accidental entries.
+  const mPfx0=`${year}-${String(month).padStart(2,'0')}`;
+  const heavyOff=physicians.map(p=>({p,n:(p.shiftsOff||[]).filter(s=>s.startsWith(mPfx0)).length}))
+    .filter(x=>x.n>=10).sort((a,b)=>b.n-a.n);
+  if(heavyOff.length){
+    warnings.push(`ℹ แพทย์ที่ปิดเวร (shift-off) เดือนนี้เยอะ: ${heavyOff.map(x=>`${x.p.name} ${x.n} เวร`).join(', ')} — ถ้าไม่ได้ตั้งใจปิดเยอะขนาดนี้ ให้เข้าไปลบวันปิดเวรที่ไม่ต้องการ`);
+  }
 
   const days=daysInMonth(year,month);
   // ── Fill slots TIGHTEST-FIRST ───────────────────────────────────────────
@@ -456,7 +470,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
     const cpool=physicians.filter(p=>
       isChief(p)&&!inSlot.has(p.id)&&
       !(p.daysOff||[]).includes(date)&&!(p.shiftsOff||[]).includes(date+"_"+shift)&&
-      (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+      (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
       isAvailableForSlot(p,date,shift)&&
       !hasImmediateConflict(p.id,date,shift,newAssignments)&&
       !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
@@ -482,7 +496,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         !fixedPids.has(p.id)&&
         !(p.daysOff||[]).includes(date)&&
         !(p.shiftsOff||[]).includes(date+"_"+shift)&&
-        (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+        (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
         isAvailableForSlot(p,date,shift)&&
         // Hard block: forbidden 0-hr gaps (เช้า→บ่าย, ดึก→เช้า same day, บ่าย→ดึก cross-day)
         !hasImmediateConflict(p.id,date,shift,newAssignments)&&
@@ -596,7 +610,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         const pool3=physicians.filter(p=>
           !fixedPids.has(p.id)&&
           !(p.daysOff||[]).includes(date)&&
-          (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+          (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
           isAvailableForSlot(p,date,shift)&&
           !hasImmediateConflict(p.id,date,shift,newAssignments)&&
           !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
@@ -622,7 +636,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         const pool4=physicians.filter(p=>
           !fixedPids.has(p.id)&&
           !(p.daysOff||[]).includes(date)&&
-          (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+          (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
           isAvailableForSlot(p,date,shift)&&
           !hasImmediateConflict(p.id,date,shift,newAssignments)&&
           !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
@@ -648,7 +662,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         const pool5=physicians.filter(p=>
           !fixedPids.has(p.id)&&
           !(p.daysOff||[]).includes(date)&&
-          (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+          (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
           isAvailableForSlot(p,date,shift)&&
           !hasImmediateConflict(p.id,date,shift,newAssignments)&&
           !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
@@ -688,7 +702,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         !existingPids.has(p.id)&&
         !(p.daysOff||[]).includes(date)&&
         !(p.shiftsOff||[]).includes(date+"_"+shift)&&
-        (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+        (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
         isAvailableForSlot(p,date,shift)&&
         !hasImmediateConflict(p.id,date,shift,newAssignments)
       );
@@ -741,7 +755,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
           if(newAssignments.some(a=>a.date===date&&a.shiftType===sh&&a.physicianId===p.id))continue;
           const slotCount=newAssignments.filter(a=>a.date===date&&a.shiftType===sh).length;
           if(slotCount>=(STAFFING[sh]?.max??2))continue;
-          if((shiftCounts[p.id]||0)>=(p.maxShifts||99))continue;
+          if((shiftCounts[p.id]||0)>=(p.maxShifts||0))continue;
           // Weekend block for วนนอก period
           if(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))continue;
           // Hard cap: never build a chain longer than 4 consecutive (8เว้น8) shifts,
@@ -805,7 +819,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
           if(newAssignments.some(a=>a.date===date&&a.shiftType===sh&&a.physicianId===p.id))continue;
           const slotCount=newAssignments.filter(a=>a.date===date&&a.shiftType===sh).length;
           if(slotCount>=STAFFING[sh].max)continue;
-          if((shiftCounts[p.id]||0)>=(p.maxShifts||99))continue;
+          if((shiftCounts[p.id]||0)>=(p.maxShifts||0))continue;
           if(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))continue;
           if((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&
              isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)continue;
@@ -862,7 +876,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
     const pool=physicians.filter(p=>
       !newAssignments.some(a=>a.date===date&&a.shiftType==="evening"&&a.physicianId===p.id)&&
       !(p.daysOff||[]).includes(date)&&!(p.shiftsOff||[]).includes(date+"_evening")&&
-      (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+      (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
       isAvailableForSlot(p,date,"evening")&&
       !hasImmediateConflict(p.id,date,"evening",newAssignments)&&
       !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"evening"))&&
@@ -888,7 +902,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
     const pool=physicians.filter(p=>
       !newAssignments.some(a=>a.date===date&&a.shiftType==="morning"&&a.physicianId===p.id)&&
       !(p.daysOff||[]).includes(date)&&!(p.shiftsOff||[]).includes(date+"_morning")&&
-      (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+      (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
       isAvailableForSlot(p,date,"morning")&&
       !hasImmediateConflict(p.id,date,"morning",newAssignments)&&
       !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"morning"))&&
@@ -913,7 +927,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
     const pool=physicians.filter(p=>
       !newAssignments.some(a=>a.date===date&&a.shiftType==="evening"&&a.physicianId===p.id)&&
       !(p.daysOff||[]).includes(date)&&
-      (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+      (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
       isAvailableForSlot(p,date,"evening")&&
       !hasImmediateConflict(p.id,date,"evening",newAssignments)&&
       !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"evening"))&&
@@ -942,7 +956,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
     const pool=physicians.filter(p=>
       !newAssignments.some(a=>a.date===date&&a.shiftType==="night"&&a.physicianId===p.id)&&
       !(p.daysOff||[]).includes(date)&&
-      (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+      (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
       isAvailableForSlot(p,date,"night")&&
       !hasImmediateConflict(p.id,date,"night",newAssignments)&&
       !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"night"))&&
@@ -972,7 +986,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
   {
     const mPfx=`${year}-${String(month).padStart(2,'0')}`;
     for(const p of physicians){
-      const mx=p.maxShifts||99;
+      const mx=p.maxShifts||0;
       const cnt=()=>newAssignments.filter(a=>a.physicianId===p.id&&a.date.startsWith(mPfx)).length;
       if(cnt()<=mx)continue;
       const removable=newAssignments
@@ -1013,7 +1027,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         isChief(p)&&!existingPids.has(p.id)&&
         !(p.daysOff||[]).includes(date)&&
         !(p.shiftsOff||[]).includes(date+"_"+shift)&&
-        (shiftCounts[p.id]||0)<(p.maxShifts||99)&&
+        (shiftCounts[p.id]||0)<(p.maxShifts||0)&&
         isAvailableForSlot(p,date,shift)&&
         !hasImmediateConflict(p.id,date,shift,newAssignments)&&
         !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
@@ -1114,6 +1128,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
       const date=dateStr(year,month,d);
       if(newAssignments.some(a=>a.date===date&&a.shiftType===shift))continue; // not empty
       const pool=physicians.filter(p=>
+        (p.maxShifts||0)>0&& // Max=0 means "never schedule" — respected even here
         !(p.daysOff||[]).includes(date)&&
         !(p.shiftsOff||[]).includes(date+"_"+shift)&&
         isAvailableForSlot(p,date,shift)&&
@@ -1128,7 +1143,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
       if(pool.length===0)continue; // genuinely nobody free — reported below
       const p=pool[0];
       // This is the ONLY place max may be exceeded (empty slot must be covered).
-      if((shiftCounts[p.id]||0)>=(p.maxShifts||99)){
+      if((shiftCounts[p.id]||0)>=(p.maxShifts||0)){
         warnings.push(`เวร${SH_SHORT[shift]}วันที่ ${d}: จำเป็นต้องให้ ${p.name} อยู่เกินโควตา max (${(shiftCounts[p.id]||0)+1}/${p.maxShifts}) เพราะไม่งั้นเวรนี้จะว่าง — วิธีแก้: เพิ่ม Max/เพิ่มแพทย์ หรือลดวันหยุดวันนี้`);
       }
       newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:shift,isLocked:false,isManual:false});
@@ -1158,8 +1173,8 @@ function generateSchedule(physicians,year,month,existingAssignments){
         const chiefs=physicians.filter(isChief);
         const off=chiefs.filter(isOff).map(p=>p.name);
         const rest=chiefs.filter(p=>!isOff(p));
-        const maxed=rest.filter(p=>(shiftCounts[p.id]||0)>=(p.maxShifts||99)).map(p=>p.name);
-        const other=rest.filter(p=>(shiftCounts[p.id]||0)<(p.maxShifts||99)).map(p=>p.name);
+        const maxed=rest.filter(p=>(shiftCounts[p.id]||0)>=(p.maxShifts||0)).map(p=>p.name);
+        const other=rest.filter(p=>(shiftCounts[p.id]||0)<(p.maxShifts||0)).map(p=>p.name);
         const parts=[];
         if(off.length)parts.push(`ชีฟขอหยุด: ${off.join(', ')}`);
         if(maxed.length)parts.push(`ชีฟเวรเต็มโควตา: ${maxed.join(', ')}`);
@@ -1204,7 +1219,7 @@ function clusterRestDays(physicians,assignments,year,month){
 
   for(const p of physicians){
     const min=p.minShifts||0;
-    const max=p.maxShifts||99;
+    const max=p.maxShifts||0;
     for(let d=2;d<days;d++){// skip first and last day (no neighbours)
       const ds=dateStr(year,month,d);
       const hasShift=assignments.some(a=>a.physicianId===p.id&&a.date===ds);
@@ -1230,7 +1245,7 @@ function clusterRestDays(physicians,assignments,year,month){
           !alreadyThere.has(q.id)&&
           !(q.daysOff||[]).includes(slotDate)&&
           !(q.shiftsOff||[]).includes(slotDate+"_"+slotSh)&&
-          counts[q.id]<(q.maxShifts||99)&&
+          counts[q.id]<(q.maxShifts||0)&&
           isAvailableForSlot(q,slotDate,slotSh)&&
           counts[q.id]>=(q.minShifts||0)-1&&// don't pull from someone already below min
           !hasImmediateConflict(q.id,slotDate,slotSh,assignments)// no forbidden pairs
@@ -1248,7 +1263,7 @@ function clusterRestDays(physicians,assignments,year,month){
         // push them past their max (the cached counts can drift across swaps, which was
         // letting a donor tip 1 over max).
         const donorActual=assignments.filter(a=>a.physicianId===donor.id&&a.date.startsWith(monthPrefix)).length;
-        if(donorActual>=(donor.maxShifts||99))continue;
+        if(donorActual>=(donor.maxShifts||0))continue;
         // Perform swap: remove p's assignment, add donor's
         const idx=assignments.indexOf(shiftToMove);
         if(idx<0)continue;
