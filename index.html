@@ -466,6 +466,46 @@ function generateSchedule(physicians,year,month,existingAssignments){
   }
   slotOrder.sort((a,b)=>a.availCount-b.availCount||a.chiefAvail-b.chiefAvail||a.date.localeCompare(b.date)||SHIFTS.indexOf(a.shift)-SHIFTS.indexOf(b.shift));
 
+  // ── Seed ~3 เวรบ่ายช่วง "วนนอก" ให้หมอครึ่งเดือน (ต้องมาก่อนทุกการจัด) ─────
+  // เช่น ธนวัฒน์ (วนนอกครึ่งเดือนแรก): ช่วงวันที่ 1-15 เป็นช่วงวนนอก (อยู่ได้แต่บ่าย จ-พฤ).
+  // เดิมระบบ front-load เวรไปกองที่ครึ่ง "ใน" หมด เขาเลยแทบไม่มีเวรช่วงวนนอก. จองเวรบ่าย
+  // ~3 เวรช่วงวนนอกไว้ก่อนเลย (ก่อนจองชีฟ/เติมทั่วไป) ไม่งั้นโควตาจะถูกใช้กับครึ่งในหมด
+  // แล้ว seed จะทำให้เกิน max → โดน sweep ตัดทิ้ง. best-effort, กระจายทั่วช่วง, ไม่เกิน max.
+  {
+    const NOK_SEED=3;
+    for(const p of physicians){
+      if(p.rotation!=="วนนอกครึ่งเดือนแรก"&&p.rotation!=="วนนอกครึ่งเดือนหลัง")continue;
+      if((p.maxShifts||0)<=0)continue;
+      // นับเฉพาะเดือนที่กำลังจัด — isInVanNokPeriod ดูแค่วันที่ ไม่ดูเดือน จึงต้องกรอง genPfx
+      const nokCount=()=>newAssignments.filter(a=>a.physicianId===p.id&&a.date.startsWith(genPfx)&&isInVanNokPeriod(p,a.date)).length;
+      const eligible=[];
+      for(let d=1;d<=days;d++){
+        const date=dateStr(year,month,d);
+        if(!isInVanNokPeriod(p,date))continue;               // เฉพาะช่วงวนนอกของเขา
+        if((p.daysOff||[]).includes(date))continue;
+        if((p.shiftsOff||[]).includes(date+"_evening"))continue;
+        if(!isAvailableForSlot(p,date,"evening"))continue;   // วนนอก = บ่าย จ-พฤ (เสาร์อาทิตย์ถูกบล็อก)
+        eligible.push(date);
+      }
+      if(!eligible.length)continue;
+      const picks=[];                                        // กระจายให้ทั่วช่วง (ไม่กระจุกต้นเดือน)
+      const step=Math.max(1,Math.floor(eligible.length/NOK_SEED));
+      for(let i=0;i<eligible.length&&picks.length<NOK_SEED;i+=step)picks.push(eligible[i]);
+      for(const date of picks){
+        if(nokCount()>=NOK_SEED)break;
+        if((shiftCounts[p.id]||0)>=(p.maxShifts||0))break;
+        if(newAssignments.some(a=>a.date===date&&a.shiftType==="evening"&&a.physicianId===p.id))continue;
+        if(newAssignments.filter(a=>a.date===date&&a.shiftType==="evening").length>=STAFFING_EXT.evening)continue;
+        if(hasImmediateConflict(p.id,date,"evening",newAssignments))continue;
+        if(newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"evening")))continue;
+        if(getRunLength(p.id,date,"evening",newAssignments)>5)continue;
+        newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:"evening",isLocked:false,isManual:false});
+        shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
+        if(shiftTypeCounts[p.id])shiftTypeCounts[p.id]["evening"]=(shiftTypeCounts[p.id]["evening"]||0)+1;
+      }
+    }
+  }
+
   // ── Reserve one chief for EVERY slot FIRST (ชีฟทุกเวร = priority 4) ───────
   // ก่อนเติมเวรทั่วไป จองชีฟ 1 คนให้ทุกเวรของทั้งเดือน เรียงจากเวรที่ "ชีฟว่างน้อยสุด"
   // ก่อน (เช่น เวรบ่ายที่วนนอกล้วน, ปลายเดือนที่ชีฟใกล้เต็ม max) — เดิมจองเฉพาะเวรบ่าย
@@ -1827,6 +1867,7 @@ function ChipMenu({x,y,assignment,physician,physicians,assignments,setAssignment
   const outsideRot=physician&&!isAvailableForSlot(physician,assignment.date,assignment.shiftType);
 
   function doMove(shift){
+    if(assignment.isLocked){onClose();return;} // ล็อกอยู่ — แก้ไม่ได้จนกว่าจะปลดล็อก
     if(shift===assignment.shiftType){onClose();return;}
     pushUndo("ย้ายเวร");
     setAssignments(prev=>prev.map(a=>a.id===assignment.id?{...a,shiftType:shift,isManual:true}:a));
@@ -1834,6 +1875,7 @@ function ChipMenu({x,y,assignment,physician,physicians,assignments,setAssignment
     onClose();
   }
   function doRemove(){
+    if(assignment.isLocked){onClose();return;} // ล็อกอยู่ — ลบไม่ได้จนกว่าจะปลดล็อก
     pushUndo("ลบเวร");
     setAssignments(prev=>prev.filter(a=>a.id!==assignment.id));
     logAction(`➖ ลบ ${physician?.name||''} ออกจากเวร${SH_SHORT[assignment.shiftType]} ${fmtDate(assignment.date)}`);
@@ -1853,6 +1895,12 @@ function ChipMenu({x,y,assignment,physician,physicians,assignments,setAssignment
         {outsideRot&&<div className="text-xs text-amber-600 mt-0.5 bg-amber-50 px-1.5 py-0.5 rounded">⚠ นอกรูปแบบ ({physician?.rotation})</div>}
       </div>
       <div className="p-1">
+        {assignment.isLocked?(
+          <div className="px-3 py-2.5 text-sm text-slate-600 flex items-start gap-1.5">
+            <span className="text-base leading-none">🔒</span>
+            <span>เวรนี้ถูกล็อก — กด <b>“🔓 ปลดล็อก”</b> ทั้งเดือนก่อน ถึงจะย้าย/ลบได้</span>
+          </div>
+        ):(<>
         <div className="relative"
           onMouseEnter={()=>setHoverMove(true)} onMouseLeave={()=>setHoverMove(false)}>
           <button type="button"
@@ -1876,6 +1924,7 @@ function ChipMenu({x,y,assignment,physician,physicians,assignments,setAssignment
           className="w-full text-left px-3 py-2 text-sm rounded-lg hover:bg-red-50 text-red-600 font-medium">
           ✕ ลบออกจากเวร
         </button>
+        </>)}
       </div>
     </div>
   );
@@ -2271,11 +2320,18 @@ function SchedulePage({physicians,year,month,setYear,setMonth,assignments,setAss
   }
 
   function handleClearAll(){
-    if(window.confirm("ล้างตารางเวรทั้งหมดในเดือนนี้?")){
-      const n=assignments.filter(a=>a.date.startsWith(monthPfx)).length;
+    const inMonth=assignments.filter(a=>a.date.startsWith(monthPfx));
+    const lockedN=inMonth.filter(a=>a.isLocked).length;
+    const removableN=inMonth.length-lockedN;
+    if(removableN===0){
+      setGenMsg(lockedN?`⚠ เดือนนี้ล็อกไว้ทั้งหมด (${lockedN} เวร) — กด “🔓 ปลดล็อก” ก่อนถึงจะล้างได้`:"เดือนนี้ยังไม่มีเวรให้ล้าง");
+      return;
+    }
+    if(window.confirm(`ล้างเวรที่ยังไม่ล็อกในเดือนนี้ (${removableN} เวร)?`+(lockedN?`\nเวรที่ล็อกไว้ ${lockedN} เวร จะถูกเก็บไว้ (ปลดล็อกก่อนถ้าอยากล้างด้วย)`:``))){
+      // Keep locked shifts — only ปลดล็อก can remove them
       pushUndo(`ล้างเวรทั้งเดือน ${monthLabel}`);
-      setAssignments(prev=>prev.filter(a=>!a.date.startsWith(monthPfx)));
-      logAction(`🗑 ล้างเวรทั้งเดือน ${monthLabel} (${n} เวร)`);
+      setAssignments(prev=>prev.filter(a=>!a.date.startsWith(monthPfx)||a.isLocked));
+      logAction(`🗑 ล้างเวรที่ไม่ล็อก ${monthLabel} (${removableN} เวร${lockedN?`, คงเวรล็อก ${lockedN} เวร`:``})`);
     }
   }
 
