@@ -228,6 +228,43 @@ async function cloudSet(key, value) {
   } catch {}
 }
 
+// ── Per-month assignment storage ──────────────────────────────────────────────
+// Assignments used to live in ONE cloud key ('assignments'). Two problems: (1) the
+// backend silently drops a value over ~50KB (a Sheet-cell limit), so it could not
+// hold more than ~1 month of shifts; (2) last-write-wins meant a tab whose state
+// lacked a month would overwrite the whole blob and wipe that month. Storing each
+// month under its own key `asg_<YYYY-MM>` fixes BOTH: every month is small, and a
+// tab that doesn't have a month never writes (and so can never wipe) that month's
+// key. The legacy 'assignments' key is migrated then emptied.
+function ymOf(d){ return (d||"").slice(0,7); }
+function groupAsgByMonth(assignments){
+  const g={}; (assignments||[]).forEach(a=>{ const k=ymOf(a.date); if(k)(g[k]=g[k]||[]).push(a); }); return g;
+}
+function nearbyMonths(n){
+  const out=[]; const now=new Date();
+  for(let i=-n;i<=n;i++){ const d=new Date(now.getFullYear(),now.getMonth()+i,1); out.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`); }
+  return out;
+}
+async function cloudGetAllAssignments(cmeta, localAssignments){
+  const set=new Set([...((cmeta&&cmeta.months)||[]), ...Object.keys(groupAsgByMonth(localAssignments)), ...nearbyMonths(4)]);
+  const months=[...set];
+  const parts=await Promise.all(months.map(ym=>cloudGet('asg_'+ym)));
+  const all=[]; const have=new Set();
+  const add=a=>{ const k=a.physicianId+'|'+a.date+'|'+a.shiftType; if(!have.has(k)){ have.add(k); all.push(a); } };
+  parts.forEach(p=>{ if(Array.isArray(p)) p.forEach(add); });
+  const legacy=await cloudGet('assignments'); // migrate old single-key data once
+  if(Array.isArray(legacy)) legacy.forEach(add);
+  return all;
+}
+// Writes ONLY the months present in `assignments` (never touches other months' keys,
+// so a stale tab can't wipe a month it lacks) and empties the legacy key.
+async function cloudSetAllAssignments(assignments){
+  const g=groupAsgByMonth(assignments);
+  const months=Object.keys(g);
+  await Promise.all([ ...months.map(ym=>cloudSet('asg_'+ym, g[ym])), cloudSet('assignments', []) ]);
+  return months;
+}
+
 // Returns true if doctor can ONLY work this shift today (e.g. วนนอก for evening)
 function isRestrictedToShift(p,date,shift){
   return SHIFTS.filter(s=>s!==shift).every(s=>!isAvailableForSlot_raw(p,date,s));
@@ -2921,13 +2958,13 @@ function App(){
     async function loadFromCloud() {
       if (!SCRIPT_URL) { setLoading(false); return; }
       try {
-        const [cp, ca, cact, clog, cmeta] = await Promise.all([
+        const [cp, cact, clog, cmeta] = await Promise.all([
           cloudGet('physicians'),
-          cloudGet('assignments'),
           cloudGet('activities'),
           cloudGet('auditlog'),
           cloudGet('meta'),
         ]);
+        const ca = await cloudGetAllAssignments(cmeta, assignRef.current); // per-month keys
         // Whose data is fresher? If THIS device saved after the cloud did, the
         // cloud copy is stale — keep the local schedule (an edit that hadn't
         // finished syncing before a reload is no longer wiped) and push it up.
@@ -2950,14 +2987,14 @@ function App(){
           const localCa = assignRef.current;
           const cleanLocal = remapAssignments(localCa, allKnown, physList).filter(a=>{ const p=physByIdC[a.physicianId]; return !p||!(p.daysOff||[]).includes(a.date); });
           setAssignments(cleanLocal); saveLS('erpk_assignments', cleanLocal);
-          cloudSet('assignments', cleanLocal);
+          cloudSetAllAssignments(cleanLocal).then(months=>cloudSet('meta',{savedAt:localTs,months}));
         } else if (ca && ca.length > 0) {
           // Re-point shifts from removed duplicate ids to the surviving doctor,
           // then strip anything that conflicts with that doctor's daysOff.
           const remapped = remapAssignments(ca, allKnown, physList);
           const cleanCa = remapped.filter(a=>{ const p=physByIdC[a.physicianId]; return !p||!(p.daysOff||[]).includes(a.date); });
           setAssignments(cleanCa); saveLS('erpk_assignments', cleanCa);
-          cloudSet('assignments', cleanCa); // push cleaned schedule back so stale rows die for good
+          cloudSetAllAssignments(cleanCa); // re-write per-month (migrates legacy blob → month keys)
         }
         if (cact && cact.length > 0) { setActivities(cact); saveLS('erpk_activities_v11', cact); }
         if (clog && clog.length) { const local=loadLS('erpk_auditlog',[]); const merged=[...clog,...local].filter((e,i,arr)=>arr.findIndex(x=>x.t===e.t&&x.a===e.a)===i).sort((a,b)=>b.t-a.t).slice(0,400); setAuditLog(merged); saveLS('erpk_auditlog',merged); }
@@ -2990,12 +3027,12 @@ function App(){
     setSyncStatus('saving');
     const t = setTimeout(async () => {
       try {
+        const months = await cloudSetAllAssignments(safeAssignments); // per-month keys
         await Promise.all([
           cloudSet('physicians', cleanPhys),
-          cloudSet('assignments', safeAssignments),
           cloudSet('activities', activities),
           cloudSet('auditlog', auditLog),
-          cloudSet('meta', {savedAt: ts}),
+          cloudSet('meta', {savedAt: ts, months}),
         ]);
         setSyncStatus('saved');
         setTimeout(() => setSyncStatus('idle'), 3000);
@@ -3014,9 +3051,12 @@ function App(){
         if (!SCRIPT_URL) return;
         const ts = Date.now(); saveLS('erpk_savedAt', ts);
         const send = (key,value)=>{ try{ navigator.sendBeacon(SCRIPT_URL, new Blob([JSON.stringify({key,value})],{type:'text/plain'})); }catch{} };
-        send('assignments', safeAssignments);
+        const g = groupAsgByMonth(safeAssignments);           // per-month keys (never wipe a month we lack)
+        const months = Object.keys(g);
+        months.forEach(ym=>send('asg_'+ym, g[ym]));
+        send('assignments', []);                              // empty legacy key
         send('physicians', dedupePhysByName(physicians));
-        send('meta', {savedAt: ts});
+        send('meta', {savedAt: ts, months});
         send('auditlog', auditLog);
       } catch {}
     };
