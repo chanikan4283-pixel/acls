@@ -543,7 +543,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         if(newAssignments.filter(a=>a.date===date&&a.shiftType==="evening").length>=STAFFING_EXT.evening)continue;
         if(hasImmediateConflict(p.id,date,"evening",newAssignments))continue;
         if(newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"evening")))continue;
-        if(getRunLength(p.id,date,"evening",newAssignments)>5)continue;
+        if(getRunLength(p.id,date,"evening",newAssignments)>3)continue;
         newAssignments.push({id:uid(),physicianId:p.id,date,shiftType:"evening",isLocked:false,isManual:false});
         shiftCounts[p.id]=(shiftCounts[p.id]||0)+1;
         if(shiftTypeCounts[p.id])shiftTypeCounts[p.id]["evening"]=(shiftTypeCounts[p.id]["evening"]||0)+1;
@@ -580,7 +580,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         isAvailableForSlot(p,date,shift)&&
         !hasImmediateConflict(p.id,date,shift,newAssignments)&&
         !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
-        getRunLength(p.id,date,shift,newAssignments)<=5
+        getRunLength(p.id,date,shift,newAssignments)<=3
       ).sort(byFewestType(shift));
       if(cpool.length===0)continue;
       const p=cpool[0];
@@ -620,7 +620,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         !((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&
           isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)&&
         // Chain limit: 8h-rest chain ≤ 4 slots
-        getRunLength(p.id,date,shift,newAssignments)<=5
+        getRunLength(p.id,date,shift,newAssignments)<=3
       );
 
       // Sort: 0) CHIEF REQUIRED if slot has none — chiefs always sorted first until one is placed
@@ -659,10 +659,10 @@ function generateSchedule(physicians,year,month,existingAssignments){
         const aRun=getRunLength(a.id,date,shift,newAssignments);
         const bRun=getRunLength(b.id,date,shift,newAssignments);
         if(aRun!==bRun){
-          if(aRun>5&&bRun<=5)return 1;
-          if(bRun>5&&aRun<=5)return -1;
-          if(aRun>5&&bRun<=5)return 1;
-          if(bRun>5&&aRun<=5)return -1;
+          if(aRun>3&&bRun<=3)return 1;
+          if(bRun>3&&aRun<=3)return -1;
+          if(aRun>3&&bRun<=3)return 1;
+          if(bRun>3&&aRun<=3)return -1;
         }
 
         // Penalize วนนอก-period doctors who already have many shifts in their วนนอก half
@@ -729,7 +729,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
           // Hard block: วนนอก period doctors cannot work weekends (Fri=5/Sat=6/Sun=0)
           !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
           // Chain limit in Pass 3
-          getRunLength(p.id,date,shift,newAssignments)<=5
+          getRunLength(p.id,date,shift,newAssignments)<=3
         );
         pool3.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
         for(const p of pool3){
@@ -752,7 +752,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
           isAvailableForSlot(p,date,shift)&&
           !hasImmediateConflict(p.id,date,shift,newAssignments)&&
           !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))&&
-          getRunLength(p.id,date,shift,newAssignments)<=5
+          getRunLength(p.id,date,shift,newAssignments)<=3
         );
         pool4.sort((a,b)=>(shiftCounts[a.id]||0)-(shiftCounts[b.id]||0));
         for(const p of pool4){
@@ -780,8 +780,8 @@ function generateSchedule(physicians,year,month,existingAssignments){
           !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
         );
         pool5.sort((a,b)=>{
-          const ar=getRunLength(a.id,date,shift,newAssignments)>5?1:0;
-          const br=getRunLength(b.id,date,shift,newAssignments)>5?1:0;
+          const ar=getRunLength(a.id,date,shift,newAssignments)>3?1:0;
+          const br=getRunLength(b.id,date,shift,newAssignments)>3?1:0;
           if(ar!==br)return ar-br; // keep chains ≤4 first
           return (shiftCounts[a.id]||0)-(shiftCounts[b.id]||0);
         });
@@ -886,7 +886,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
       const isHalfU=(p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง");
       candidates.sort((a,b)=>{
         // Keep chains ≤4 whenever possible — only spill to 5–6 if no ≤4 slot exists.
-        const aOver=a.run>4?1:0,bOver=b.run>4?1:0;
+        const aOver=a.run>2?1:0,bOver=b.run>2?1:0;
         if(aOver!==bOver)return aOver-bOver;
         // Strongly prefer shift type furthest below equal 1/3 share
         const aShare=pTotu===0?0:(pTCu[a.sh]||0)/pTotu;
@@ -935,7 +935,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
           if(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))continue;
           if((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&
              isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)continue;
-          if(getRunLength(p.id,date,sh,newAssignments)>5)continue;
+          if(getRunLength(p.id,date,sh,newAssignments)>3)continue;
           cands.push({date,sh,slotCount});
         }
       }
@@ -993,7 +993,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
       !hasImmediateConflict(p.id,date,"evening",newAssignments)&&
       !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"evening"))&&
       !((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)&&
-      getRunLength(p.id,date,"evening",newAssignments)<=5
+      getRunLength(p.id,date,"evening",newAssignments)<=3
     ).sort(byFewestType("evening"));
     if(pool.length===0)continue;
     const p=pool[0];
@@ -1018,7 +1018,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
       isAvailableForSlot(p,date,"morning")&&
       !hasImmediateConflict(p.id,date,"morning",newAssignments)&&
       !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"morning"))&&
-      getRunLength(p.id,date,"morning",newAssignments)<=5
+      getRunLength(p.id,date,"morning",newAssignments)<=3
     ).sort(byFewestType("morning"));
     if(pool.length===0)continue;
     const p=pool[0];
@@ -1045,7 +1045,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
       !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"evening"))&&
       !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
       !((p.rotation==="วนนอกครึ่งเดือนแรก"||p.rotation==="วนนอกครึ่งเดือนหลัง")&&isInVanNokPeriod(p,date)&&vanNokHalfShiftCount(p.id,date,newAssignments)>=4)&&
-      getRunLength(p.id,date,"evening",newAssignments)<=5
+      getRunLength(p.id,date,"evening",newAssignments)<=3
     );
     pool.sort(byFewestType("evening"));
     for(const p of pool){
@@ -1073,7 +1073,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
       !hasImmediateConflict(p.id,date,"night",newAssignments)&&
       !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,"night"))&&
       !(isInVanNokPeriod(p,date)&&[0,5,6].includes(new Date(date+'T00:00:00').getDay()))&&
-      getRunLength(p.id,date,"night",newAssignments)<=5
+      getRunLength(p.id,date,"night",newAssignments)<=3
     );
     pool.sort(byFewestType("night"));
     for(const p of pool){
@@ -1107,7 +1107,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         const without=newAssignments.filter(x=>x!==a); // evaluate as if their บ่าย is gone
         if(hasImmediateConflict(p.id,date,"morning",without))return false;
         if(without.filter(x=>x.date===date&&x.physicianId===p.id).map(x=>x.shiftType).some(s=>isConsecutiveConflict(s,"morning")))return false;
-        if(getRunLength(p.id,date,"morning",without)>5)return false;
+        if(getRunLength(p.id,date,"morning",without)>3)return false;
         if(isChief(p)&&!evening.some(x=>x!==a&&physMap[x.physicianId]&&isChief(physMap[x.physicianId])))return false; // keep บ่าย's chief
         return true;
       }).sort((x,y)=>((physMap[x.physicianId]&&isChief(physMap[x.physicianId]))?1:0)-((physMap[y.physicianId]&&isChief(physMap[y.physicianId]))?1:0)); // move non-chief first
@@ -1183,7 +1183,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
         !newAssignments.filter(a=>a.date===date&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift))
       ).map(p=>({p,run:getRunLength(p.id,date,shift,newAssignments)}))
        .sort((a,b)=>a.run-b.run||(shiftCounts[a.p.id]||0)-(shiftCounts[b.p.id]||0));
-      const pick=chiefPool.find(c=>c.run<=5)||chiefPool[0];
+      const pick=chiefPool.find(c=>c.run<=3)||chiefPool[0];
       if(!pick)continue; // genuinely no chief free — unified report explains why
       const chief=pick.p;
       const cap=STAFFING_EXT[shift]||STAFFING[shift].max; // morning 3, evening 4, night 3
@@ -1251,7 +1251,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
           if(!donorShift)continue;
           // ensure the move doesn't build a chain>5 at the new slot (evaluate without the donor)
           const without=newAssignments.filter(a=>a!==donorShift);
-          if(getRunLength(p.id,date,shift,without)>5)continue;
+          if(getRunLength(p.id,date,shift,without)>3)continue;
           const di=newAssignments.indexOf(donorShift);
           if(di<0)continue;
           const oldSh=donorShift.shiftType;
@@ -1298,7 +1298,7 @@ function generateSchedule(physicians,year,month,existingAssignments){
               const without=newAssignments.filter(a=>a!==donorA);
               if(hasImmediateConflict(p.id,rDate,shift,without))continue;
               if(without.filter(a=>a.date===rDate&&a.physicianId===p.id).map(a=>a.shiftType).some(s=>isConsecutiveConflict(s,shift)))continue;
-              if(getRunLength(p.id,rDate,shift,without)>5)continue;
+              if(getRunLength(p.id,rDate,shift,without)>3)continue;
               const di=newAssignments.indexOf(donorA);
               newAssignments.splice(di,1);
               newAssignments.push({id:uid(),physicianId:p.id,date:rDate,shiftType:shift,isLocked:false,isManual:false});
@@ -1388,9 +1388,9 @@ function generateSchedule(physicians,year,month,existingAssignments){
   for(const p of physicians){
     const mine=newAssignments.filter(a=>a.physicianId===p.id&&a.date.startsWith(_mPfx))
       .map(a=>({a,r:shiftEpochRange(a.date,a.shiftType)})).sort((x,y)=>x.r.start-y.r.start);
-    if(mine.length<6)continue;
+    if(mine.length<4)continue;
     let cl=[mine[0]];
-    const flush=()=>{ if(cl.length>5){ const ds=[...new Set(cl.map(c=>+c.a.date.slice(8)))].sort((x,y)=>x-y); warnings.push(`⛓ ${p.name}: เวรติดกัน ${cl.length} เวร (วันที่ ${ds.join(', ')}) — เกิน 5 เพื่อให้มีคน/ชีฟครบ`); } };
+    const flush=()=>{ if(cl.length>3){ const ds=[...new Set(cl.map(c=>+c.a.date.slice(8)))].sort((x,y)=>x-y); warnings.push(`⛓ ${p.name}: เวรติดกัน ${cl.length} เวร (วันที่ ${ds.join(', ')}) — เกิน 3 เพื่อให้มีคน/ชีฟครบ`); } };
     for(let i=1;i<mine.length;i++){ if(mine[i].r.start-mine[i-1].r.end<=8*60)cl.push(mine[i]); else{flush();cl=[mine[i]];} }
     flush();
   }
@@ -1463,7 +1463,7 @@ function clusterRestDays(physicians,assignments,year,month){
         const donor=candidates[0];
         // Check run wouldn't exceed 4
         const donorRun=getRunLength(donor.id,slotDate,slotSh,assignments);
-        if(donorRun>4)continue;
+        if(donorRun>2)continue;
         // Verify p won't drop below min
         if(counts[p.id]-1<min)continue;
         // HARD max guard: recount the donor's ACTUAL month total right now and never
@@ -2879,7 +2879,7 @@ const DEFAULT_PHYSICIANS=[
   {id:"p4", name:"ชนิกานต์",  level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
   {id:"p5", name:"พิมพ์ลดา",  level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
   {id:"p6", name:"จิรพนธ์",   level:"R2", rotation:"วนใน", minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
-  {id:"p7", name:"มาะ",        level:"R2", rotation:"วนใน",  minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
+  {id:"p7", name:"มาฆะ",        level:"R2", rotation:"วนใน",  minShifts:22, targetShifts:24, maxShifts:27, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["morning","evening","night"]},
   {id:"p8", name:"ปานตะวัน",  level:"R1", rotation:"วนนอก", minShifts:5,  targetShifts:7,  maxShifts:10, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["evening"]},
   {id:"p9", name:"ไชยวัฒน์",  level:"R1", rotation:"วนนอก", minShifts:5,  targetShifts:7,  maxShifts:10, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["evening"]},
   {id:"p10",name:"ปภัสรา",    level:"R1", rotation:"วนนอก", minShifts:5,  targetShifts:7,  maxShifts:10, offDays:[], daysOff:[], shiftsOff:[], preferredShifts:["evening"]},
