@@ -164,6 +164,10 @@ function dedupePhysByName(list){
       daysOff:[...(best.daysOff||[])],
       shiftsOff:[...(best.shiftsOff||[])],
       preferredShifts:[...(best.preferredShifts||[])]};
+    // 'inactive' (retired/hidden) is sticky: if ANY copy marks the doctor hidden,
+    // the merged record stays hidden — so a device holding stale data (no flag) can
+    // never clobber the hide. (To un-hide, clear it on every copy.)
+    if(grp.some(p=>p.inactive===true)) rec.inactive=true; else delete rec.inactive;
     if(!isCanonical(rec.id)){ const canon=grp.find(p=>isCanonical(p.id)); if(canon)rec.id=canon.id; }
     return rec;
   });
